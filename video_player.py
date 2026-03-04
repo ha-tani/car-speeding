@@ -67,12 +67,13 @@ class VideoPlayer:
             return
         frame_number = max(0, min(frame_number, self.total_frames - 1))
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        self.current_frame = frame_number
         # シーク後に1フレーム読み込んで表示用に保持
         ret, frame = self.cap.read()
         if ret:
             self.last_frame = frame
-            self.current_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            # 読み込んだので位置が1つ進んでしまう。シークした位置に戻す
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        self.current_frame = frame_number
 
     def seek_ratio(self, ratio: float):
         """0.0〜1.0の比率でシーク"""

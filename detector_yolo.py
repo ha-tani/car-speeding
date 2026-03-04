@@ -13,6 +13,9 @@ class YoloDetector:
         self.device = self._select_device()
         self.model = YOLO(str(config.YOLO_MODEL_PATH))
         self.model.to(self.device)
+        # ナンバープレート検出専用モデル
+        self.plate_model = YOLO(str(config.YOLO_PLATE_MODEL_PATH))
+        self.plate_model.to(self.device)
 
     def _select_device(self):
         if config.USE_GPU and torch.cuda.is_available():
@@ -86,7 +89,7 @@ class YoloDetector:
         plate_x1 = int(x1 + car_w * 0.15)
         plate_x2 = int(x1 + car_w * 0.85)
         plate_y1 = int(y1 + car_h * 0.60)
-        plate_y2 = int(y2 + car_h * 0.05)  # 少し下にはみ出させる
+        plate_y2 = min(int(y1 + car_h * 0.95), y2)  # 車の下部95%まで（下端近く）
         
         # フレーム境界でクリップ
         plate_x1 = max(0, plate_x1)
@@ -100,9 +103,56 @@ class YoloDetector:
         
         return (plate_x1, plate_y1, plate_x2, plate_y2)
 
+    def detect_plate_in_car(self, frame, car_bbox):
+        """
+        車のBBox内でYOLOナンバープレートモデルを使って検出
+        car_bbox: (x1, y1, x2, y2)
+        return: (x1, y1, x2, y2) in frame coordinates or None
+        """
+        x1, y1, x2, y2 = car_bbox
+        car_crop = frame[y1:y2, x1:x2]
+        
+        if car_crop.size == 0:
+            return None
+        
+        try:
+            results = self.plate_model(
+                car_crop,
+                conf=0.25,  # ナンバープレート検出の信頼度閾値
+                device=self.device,
+                verbose=False,
+                iou=0.5
+            )
+            
+            for r in results:
+                if r.boxes is None or len(r.boxes) == 0:
+                    continue
+                
+                # 最初の検出結果を使用（最も信頼度が高い）
+                boxes = r.boxes.xyxy.cpu().numpy()
+                confs = r.boxes.conf.cpu().numpy()
+                
+                if len(boxes) > 0:
+                    # 最も信頼度の高いプレートを選択
+                    best_idx = np.argmax(confs)
+                    px1, py1, px2, py2 = boxes[best_idx]
+                    
+                    # 車のクロップ座標からフレーム座標に変換
+                    plate_x1 = int(x1 + px1)
+                    plate_y1 = int(y1 + py1)
+                    plate_x2 = int(x1 + px2)
+                    plate_y2 = int(y1 + py2)
+                    
+                    return (plate_x1, plate_y1, plate_x2, plate_y2)
+        except Exception as e:
+            print(f"Plate detection error: {e}")
+            return None
+        
+        return None
+
     def detect_cars_with_plates(self, frame):
         """
-        車とナンバープレート推定領域を同時に返す
+        車とナンバープレートYOLO検出を同時に返す
         return: list of dict
         [
           {
@@ -115,7 +165,8 @@ class YoloDetector:
         cars = self.detect_cars(frame)
         
         for car in cars:
-            plate_region = self.estimate_plate_region(car["bbox"], frame.shape)
-            car["plate_bbox"] = plate_region
+            # YOLOモデルでナンバープレートを検出
+            plate_bbox = self.detect_plate_in_car(frame, car["bbox"])
+            car["plate_bbox"] = plate_bbox
         
         return cars
