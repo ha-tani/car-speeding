@@ -287,6 +287,15 @@ class PlateOCR:
         'まみむめもやゆよらりるれろわをん'
     )
 
+    # 下段左（ひらがな1文字）専用許可文字
+    _HIRAGANA_ALLOWLIST = (
+        'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ'
+        'まみむめもやゆよらりるれろわをん'
+    )
+
+    # 下段右（一連指定番号）専用許可文字
+    _SERIAL_ALLOWLIST = '0123456789-'
+
     def _parse_plate(self, raw_text):
         """生のOCRテキストを日本のナンバープレート形式にパースする
         
@@ -471,6 +480,17 @@ class PlateOCR:
             return result['score']
         return self.count_recognized_chars(text) * 0.3  # 構造不一致は低スコア
 
+    def _post_filter(self, text):
+        """OCR生テキストからナンバープレート許可文字以外を除去する後処理フィルタ (案3)
+
+        allowlistをEasyOCRに渡すとビームサーチが歪む場合があるため、
+        制約なしOCRの結果を後処理でフィルタリングする方式。
+        """
+        if not text:
+            return text
+        allowed = set(self.plate_allowlist) | {' ', '\n', '-'}
+        return ''.join(c for c in text if c in allowed)
+
     def _run_ocr(self, image, use_allowlist=True):
         """EasyOCRを最適設定で実行しテキストを返す"""
         kwargs = {
@@ -537,6 +557,10 @@ class PlateOCR:
         ナンバープレートの上段(地域名+分類番号)と下段(ひらがな+登録番号)を
         別々にクロップしてOCRすることで精度を向上させる。
         
+        下段はさらに左右に分割し、領域別の許可文字を適用：
+          左部分（幅の約20%）: ひらがな1文字のみ許可
+          右部分（幅の約80%）: 数字とハイフンのみ許可
+        
         Returns:
             str: "上段テキスト\n下段テキスト" 形式
         """
@@ -550,7 +574,12 @@ class PlateOCR:
         # 下段: 高さの2/3
         lower_crop = image[split_y:, :]
         
-        kwargs = {
+        # 下段の左右分割（左約20%: ひらがな、右約80%: 一連指定番号）
+        kana_split_x = max(1, w // 5)
+        lower_kana_crop = lower_crop[:, :kana_split_x]
+        lower_serial_crop = lower_crop[:, kana_split_x:]
+        
+        base_kwargs = {
             'detail': 0,
             'paragraph': False,
             'text_threshold': 0.35,
@@ -560,22 +589,38 @@ class PlateOCR:
             'slope_ths': 0.3,
             'width_ths': 0.7,
         }
-        if use_allowlist:
-            kwargs['allowlist'] = self.plate_allowlist
         
-        # 上段OCR
+        # 上段OCR（既存の許可文字リストを使用）
+        upper_kwargs = dict(base_kwargs)
+        if use_allowlist:
+            upper_kwargs['allowlist'] = self.plate_allowlist
         try:
-            upper_results = self.reader.readtext(upper_crop, **kwargs)
+            upper_results = self.reader.readtext(upper_crop, **upper_kwargs)
             upper_text = ' '.join(upper_results) if upper_results else ""
         except Exception:
             upper_text = ""
         
-        # 下段OCR
+        # 下段左OCR（ひらがなのみ許可）
+        kana_kwargs = dict(base_kwargs)
+        if use_allowlist:
+            kana_kwargs['allowlist'] = self._HIRAGANA_ALLOWLIST
         try:
-            lower_results = self.reader.readtext(lower_crop, **kwargs)
-            lower_text = ' '.join(lower_results) if lower_results else ""
+            kana_results = self.reader.readtext(lower_kana_crop, **kana_kwargs)
+            kana_text = ' '.join(kana_results) if kana_results else ""
         except Exception:
-            lower_text = ""
+            kana_text = ""
+        
+        # 下段右OCR（数字とハイフンのみ許可）
+        serial_kwargs = dict(base_kwargs)
+        if use_allowlist:
+            serial_kwargs['allowlist'] = self._SERIAL_ALLOWLIST
+        try:
+            serial_results = self.reader.readtext(lower_serial_crop, **serial_kwargs)
+            serial_text = ' '.join(serial_results) if serial_results else ""
+        except Exception:
+            serial_text = ""
+        
+        lower_text = f"{kana_text} {serial_text}".strip()
         
         if upper_text or lower_text:
             return f"{upper_text}\n{lower_text}"
@@ -600,16 +645,22 @@ class PlateOCR:
         ocr_img = self._resize_to_original(image, orig_size)
         candidates = []
         candidates.append(self._run_ocr(ocr_img, use_allowlist=True))
-        candidates.append(self._run_ocr(ocr_img, use_allowlist=False))
         candidates.append(self._run_ocr_with_boxes(ocr_img, use_allowlist=True))
         candidates.append(self._run_ocr_split(ocr_img, use_allowlist=True))
-        
+        # allowlistなし + 後処理フィルタ (案3)
+        raw_no_al = self._run_ocr(ocr_img, use_allowlist=False)
+        candidates.append(raw_no_al)
+        candidates.append(self._post_filter(raw_no_al))
+
         if inv is not None:
             ocr_inv = self._resize_to_original(inv, orig_size)
             candidates.append(self._run_ocr(ocr_inv, use_allowlist=True))
             candidates.append(self._run_ocr_with_boxes(ocr_inv, use_allowlist=True))
             candidates.append(self._run_ocr_split(ocr_inv, use_allowlist=True))
-        
+            raw_inv_no_al = self._run_ocr(ocr_inv, use_allowlist=False)
+            candidates.append(raw_inv_no_al)
+            candidates.append(self._post_filter(raw_inv_no_al))
+
         return candidates
 
     def _pick_best_candidate(self, candidates):
@@ -622,6 +673,67 @@ class PlateOCR:
                 best_score = s
                 best_text = ct
         return best_text, best_score
+
+    def _vote_candidates(self, candidates):
+        """複数OCR候補から構成要素を多数決で統合する (案2)
+
+        全候補をパースし、地名・分類番号・かな・指定番号それぞれについて
+        最頻値で最終値を決定する。単純な最高スコア選択より1フレーム内の
+        OCRパターン間での誤認識に強い。
+        パース可能な候補が2つ未満の場合は_pick_best_candidateにフォールバック。
+        """
+        from collections import Counter
+
+        parsed_results = []
+        for ct in candidates:
+            if not ct:
+                continue
+            r = self._parse_plate(ct)
+            if r and r['score'] >= 2:
+                parsed_results.append(r)
+
+        best_single, best_single_score = self._pick_best_candidate(candidates)
+
+        if len(parsed_results) < 2:
+            return best_single, best_single_score
+
+        area_votes  = Counter(r['area']      for r in parsed_results if r['area'])
+        class_votes = Counter(r['class_num'] for r in parsed_results if r['class_num'])
+        kana_votes  = Counter(r['kana']      for r in parsed_results if r['kana'])
+        regl_votes  = Counter(r['reg_left']  for r in parsed_results if r['reg_left'])
+        regr_votes  = Counter(r['reg_right'] for r in parsed_results if r['reg_right'])
+
+        area      = area_votes.most_common(1)[0][0]  if area_votes  else ""
+        class_num = class_votes.most_common(1)[0][0] if class_votes else ""
+        kana      = kana_votes.most_common(1)[0][0]  if kana_votes  else ""
+        reg_left  = regl_votes.most_common(1)[0][0]  if regl_votes  else ""
+        reg_right = regr_votes.most_common(1)[0][0]  if regr_votes  else ""
+
+        upper     = f"{area} {class_num}".strip()
+        lower_reg = f"{reg_left}-{reg_right}" if reg_left or reg_right else ""
+        lower     = f"{kana} {lower_reg}".strip()
+        voted_text = f"{upper}\n{lower}".strip()
+
+        voted_score = 0
+        if area in self._AREA_NAMES:
+            voted_score += 3
+        elif area:
+            voted_score += 1
+        if class_num and len(class_num) == 3:
+            voted_score += 2
+        elif class_num:
+            voted_score += 1
+        if kana and kana in self._PLATE_HIRAGANA:
+            voted_score += 2
+        elif kana:
+            voted_score += 1
+        for c in (reg_left + reg_right):
+            if c.isdigit() or c == '・':
+                voted_score += 0.5
+        # 複数候補が一致するほど信頼度が高い（最大+1.0ボーナス）
+        voted_score += min(1.0, len(parsed_results) / max(len(candidates), 1))
+
+        return (voted_text, voted_score) if voted_score >= best_single_score else (best_single, best_single_score)
 
     def ocr_with_progressive_enhancement(self, plate_crop, callback=None):
         """段階的に全補正の強度を上げながらOCRを実行
@@ -645,11 +757,13 @@ class PlateOCR:
         best_score = 0
         original_image = plate_crop.copy()  # オリジナル保持
         orig_size = (plate_crop.shape[0], plate_crop.shape[1])  # 元のクロップサイズ
-        
+        all_candidates = []  # 全レベルの候補を蓄積（案2: 多数決用）
+
         # ===== レベル0: 補正なし =====
         try:
             candidates = self._run_all_ocr_patterns(original_image)
-            level_best_text, level_best_score = self._pick_best_candidate(candidates)
+            all_candidates.extend(candidates)
+            level_best_text, level_best_score = self._vote_candidates(candidates)
             level_count = self.count_recognized_chars(level_best_text)
             display_text = self.format_japanese_plate(level_best_text)
             
@@ -678,7 +792,8 @@ class PlateOCR:
                 inv = cv2.bitwise_not(enhanced)
                 
                 candidates = self._run_all_ocr_patterns(enhanced, inv, orig_size=orig_size)
-                level_best_text, level_best_score = self._pick_best_candidate(candidates)
+                all_candidates.extend(candidates)
+                level_best_text, level_best_score = self._vote_candidates(candidates)
                 level_count = self.count_recognized_chars(level_best_text)
                 display_text = self.format_japanese_plate(level_best_text)
                 
@@ -702,8 +817,9 @@ class PlateOCR:
         try:
             inverted_original = cv2.bitwise_not(original_image)
             candidates = self._run_all_ocr_patterns(inverted_original, orig_size=None)
-            level_best_text, level_best_score = self._pick_best_candidate(candidates)
-            
+            all_candidates.extend(candidates)
+            level_best_text, level_best_score = self._vote_candidates(candidates)
+
             if level_best_score > best_score:
                 best_text = level_best_text
                 best_image = inverted_original.copy()
@@ -713,7 +829,15 @@ class PlateOCR:
             # レベル6はコールバックしない（表示更新なし）
         except Exception as e:
             print(f"Level 6 (inverted) error: {e}")
-        
+
+        # ===== 最終: 全レベル候補による多数決 (案2) =====
+        if all_candidates:
+            final_text, final_score = self._vote_candidates(all_candidates)
+            if final_score > best_score:
+                best_text = final_text
+                best_score = final_score
+                print(f"最終多数決: score={best_score:.1f} → {self.format_japanese_plate(best_text)!r}")
+
         formatted = self.format_japanese_plate(best_text)
         print(f"OCR処理完了: score={best_score:.1f} → {formatted}")
         return best_text, best_image

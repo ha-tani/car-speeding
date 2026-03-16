@@ -82,9 +82,9 @@ class PlateDialog:
             orig_size = (self.original_crop.shape[0], self.original_crop.shape[1])
             ocr_img = self.plate_ocr._resize_to_original(image, orig_size)
             
-            # 全OCRパターンを実行
+            # 全OCRパターンを実行し多数決で最良候補を選択
             candidates = self.plate_ocr._run_all_ocr_patterns(ocr_img)
-            best_text, best_score = self.plate_ocr._pick_best_candidate(candidates)
+            best_text, best_score = self.plate_ocr._vote_candidates(candidates)
             
             # テキストを整形して表示
             display_text = self.plate_ocr.format_japanese_plate(best_text)

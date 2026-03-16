@@ -1,6 +1,7 @@
 # calibration.py
 # 映像キャリブレーション管理 ─ 4点ホモグラフィ＋進行方向
 
+import math
 import cv2
 import numpy as np
 import tkinter as tk
@@ -24,6 +25,8 @@ class CalibrationManager:
     STATE_HALF = 2
     STATE_DONE = 3
 
+    DRAG_RADIUS = 15  # ポイントをつかめる距離 [px]
+
     def __init__(self):
         self.reset()
 
@@ -46,6 +49,10 @@ class CalibrationManager:
 
         # --- 入力モード ---
         self.active_toggle = None       # "quad" | "direction" | None
+
+        # --- ドラッグ状態 ---
+        self._drag_index = -1           # ドラッグ中のポイントインデックス
+        self._drag_which = None         # "quad" | "dir" | None
 
     # ================================================================
     # トグル活性化
@@ -77,6 +84,63 @@ class CalibrationManager:
             self.dir_point2 = None
             self.dir_state = self.STATE_NONE
         self.active_toggle = None
+
+    # ================================================================
+    # ドラッグ処理（設定済みポイントの微調整）
+    # ================================================================
+    def start_drag(self, x, y):
+        """最近傍のキャリブレーションポイントをつかむ。成功したら True を返す。
+        active_toggle が None のとき（入力モード外）のみ有効。"""
+        best_dist = self.DRAG_RADIUS
+        best_index = -1
+        best_which = None
+
+        # 4点キャリブレーションポイント（HALF=途中, DONE=完了どちらも可）
+        if self.quad_state in (self.STATE_HALF, self.STATE_DONE):
+            for i, pt in enumerate(self.quad_points):
+                d = math.hypot(pt[0] - x, pt[1] - y)
+                if d < best_dist:
+                    best_dist = d
+                    best_index = i
+                    best_which = "quad"
+
+        # 進行方向ポイント
+        for idx, pt in enumerate([self.dir_point1, self.dir_point2]):
+            if pt is not None:
+                d = math.hypot(pt[0] - x, pt[1] - y)
+                if d < best_dist:
+                    best_dist = d
+                    best_index = idx
+                    best_which = "dir"
+
+        if best_which is None:
+            return False
+
+        self._drag_index = best_index
+        self._drag_which = best_which
+        return True
+
+    def update_drag(self, x, y):
+        """ドラッグ中のポイントをリアルタイムに移動する"""
+        if self._drag_which == "quad" and 0 <= self._drag_index < len(self.quad_points):
+            self.quad_points[self._drag_index] = (x, y)
+            if self.quad_state == self.STATE_DONE:
+                self._compute_homography()
+        elif self._drag_which == "dir":
+            if self._drag_index == 0:
+                self.dir_point1 = (x, y)
+            elif self._drag_index == 1:
+                self.dir_point2 = (x, y)
+
+    def end_drag(self):
+        """ドラッグ終了。ホモグラフィを確定再計算する。"""
+        if self._drag_which == "quad" and self.quad_state == self.STATE_DONE:
+            self._compute_homography()
+        self._drag_index = -1
+        self._drag_which = None
+
+    def is_dragging(self):
+        return self._drag_which is not None
 
     # ================================================================
     # クリック処理
@@ -239,6 +303,55 @@ class CalibrationManager:
         prog_color = (0, 165, 255)
         labels = ["Q1(TL)", "Q2(TR)", "Q3(BR)", "Q4(BL)"]
 
+        # ================================================================
+        # 案②: 1m グリッドオーバーレイ（キャリブレーション済み時のみ）
+        # ================================================================
+        if self.homography_inv is not None:
+            grid_color = (0, 220, 255)  # 黄緑シアン
+            fh, fw = frame.shape[:2]
+
+            def _safe_line(p1, p2):
+                """フレーム範囲を大幅に超える点は描画しない（演算誤差対策）"""
+                margin = max(fw, fh) * 3
+                for px, py in (p1, p2):
+                    if not (-margin < px < fw + margin and -margin < py < fh + margin):
+                        return
+                cv2.line(frame, p1, p2, grid_color, 1, cv2.LINE_AA)
+
+            # 縦線（幅方向: 0 → real_width_m を 1m 刻み）
+            for gx in np.arange(0, self.real_width_m + 1e-6, 1.0):
+                pts_w = np.array(
+                    [[[float(gx), gy]] for gy in np.linspace(0, self.real_height_m, 40)],
+                    dtype=np.float32)
+                pts_img = cv2.perspectiveTransform(pts_w, self.homography_inv)
+                for i in range(len(pts_img) - 1):
+                    _safe_line(
+                        (int(pts_img[i][0][0]), int(pts_img[i][0][1])),
+                        (int(pts_img[i + 1][0][0]), int(pts_img[i + 1][0][1])))
+
+            # 横線（奥行き方向: 0 → real_height_m を 1m 刻み）
+            for gy in np.arange(0, self.real_height_m + 1e-6, 1.0):
+                pts_w = np.array(
+                    [[[gx2, float(gy)] for gx2 in np.linspace(0, self.real_width_m, 40)]],
+                    dtype=np.float32).reshape(-1, 1, 2)
+                pts_img = cv2.perspectiveTransform(pts_w, self.homography_inv)
+                for i in range(len(pts_img) - 1):
+                    _safe_line(
+                        (int(pts_img[i][0][0]), int(pts_img[i][0][1])),
+                        (int(pts_img[i + 1][0][0]), int(pts_img[i + 1][0][1])))
+
+        # ================================================================
+        # 案①: ドラッグ可能なポイントのハンドル描画
+        # ================================================================
+        can_drag = (self.active_toggle is None and
+                    self.quad_state in (self.STATE_HALF, self.STATE_DONE))
+        if can_drag:
+            for i, pt in enumerate(self.quad_points):
+                is_grabbed = (self._drag_which == "quad" and self._drag_index == i)
+                ring_color = (0, 255, 255) if is_grabbed else (180, 180, 180)
+                ring_r = 14 if is_grabbed else self.DRAG_RADIUS
+                cv2.circle(frame, pt, ring_r, ring_color, 1, cv2.LINE_AA)
+
         for i, pt in enumerate(self.quad_points):
             c = done_color if self.quad_state == self.STATE_DONE else prog_color
             cv2.circle(frame, pt, 6, c, -1)
@@ -276,17 +389,21 @@ class CalibrationManager:
 
         # 進行方向矢印（マゼンタ）
         dir_c = (255, 0, 255)
-        if self.dir_point1 is not None:
-            cv2.circle(frame, self.dir_point1, 6, dir_c, -1)
-            cv2.circle(frame, self.dir_point1, 6, (255, 255, 255), 1)
-            cv2.putText(frame, "D1", (self.dir_point1[0] + 8, self.dir_point1[1] - 4),
+        for idx, pt in enumerate([self.dir_point1, self.dir_point2]):
+            if pt is None:
+                continue
+            label = "D1" if idx == 0 else "D2"
+            # ドラッグハンドル
+            if self.active_toggle is None:
+                is_grabbed = (self._drag_which == "dir" and self._drag_index == idx)
+                ring_color = (0, 255, 255) if is_grabbed else (180, 180, 180)
+                ring_r = 14 if is_grabbed else self.DRAG_RADIUS
+                cv2.circle(frame, pt, ring_r, ring_color, 1, cv2.LINE_AA)
+            cv2.circle(frame, pt, 6, dir_c, -1)
+            cv2.circle(frame, pt, 6, (255, 255, 255), 1)
+            cv2.putText(frame, label, (pt[0] + 8, pt[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, dir_c, 1, cv2.LINE_AA)
-        if self.dir_point2 is not None:
-            cv2.circle(frame, self.dir_point2, 6, dir_c, -1)
-            cv2.circle(frame, self.dir_point2, 6, (255, 255, 255), 1)
-            cv2.putText(frame, "D2", (self.dir_point2[0] + 8, self.dir_point2[1] - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, dir_c, 1, cv2.LINE_AA)
-            if self.dir_point1 is not None:
-                cv2.arrowedLine(frame, self.dir_point1, self.dir_point2, dir_c, 2, tipLength=0.15)
+        if self.dir_point1 is not None and self.dir_point2 is not None:
+            cv2.arrowedLine(frame, self.dir_point1, self.dir_point2, dir_c, 2, tipLength=0.15)
 
         return frame

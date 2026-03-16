@@ -34,8 +34,9 @@ class MouseHandler:
         self.toggle_direction = False    # 進行方向トグルリクエスト
         self.edit_width = False          # 幅編集リクエスト
         self.edit_height = False         # 奥行き編集リクエスト
-        self._seek_happened = False      # シークが発生したフラグ
-
+        self._seek_happened = False      # シークが発生したフラグ        
+        self.cal_drag_active = False     # キャリブレーションポイントのドラッグ中
+        self.calibration = None          # CalibrationManagerへの参照
     def callback(self, event, x, y, flags, param):
         player = param
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -64,12 +65,23 @@ class MouseHandler:
                 self.seekbar_dragging = True
                 self._update_seek(x, player)
             elif y < self.seekbar_y:
-                self.clicked_pos = (x, y)
+                # キャリブレーションポイントのドラッグを先に試みる
+                if (self.calibration is not None
+                        and self.calibration.active_toggle is None
+                        and self.calibration.start_drag(x, y)):
+                    self.cal_drag_active = True
+                else:
+                    self.clicked_pos = (x, y)
         elif event == cv2.EVENT_MOUSEMOVE:
-            if self.seekbar_dragging:
+            if self.cal_drag_active and self.calibration is not None:
+                self.calibration.update_drag(x, y)
+            elif self.seekbar_dragging:
                 self._update_seek(x, player)
         elif event == cv2.EVENT_LBUTTONUP:
-            if self.seekbar_dragging:
+            if self.cal_drag_active and self.calibration is not None:
+                self.calibration.end_drag()
+                self.cal_drag_active = False
+            elif self.seekbar_dragging:
                 self._update_seek(x, player)
                 self.seekbar_dragging = False
     
@@ -349,6 +361,7 @@ def run_video_app(video_path):
 
     mouse = MouseHandler()
     cv2.setMouseCallback(config.WINDOW_NAME, mouse.callback, player)
+    mouse.calibration = calibration  # ドラッグ処理用に参照を渡す
 
     tracked_cars = []
     speeds = {}  # 速度情報を保持
@@ -414,6 +427,9 @@ def run_video_app(video_path):
                 # 車検出
                 cars = detector.detect_cars(frame)
                 tracked_cars = tracker.update(cars)
+
+                # 静止車両を除外（十分な履歴が溜まってから判定）
+                tracked_cars = [tc for tc in tracked_cars if tracker.is_moving(tc["track_id"])]
 
                 # 動画時間を算出（wall-clockではなく動画のFPSベース）
                 fps = player.get_fps()
@@ -609,6 +625,11 @@ def run_video_app(video_path):
                             break
                         
                         try:
+                            # ダイアログが既に開いている場合は新たに開かない
+                            if open_dialogs:
+                                print(f"ダイアログが既に開いています。閉じてから再度クリックしてください。")
+                                break
+
                             # ナンバープレート切り出し（元解像度から切り出して高品質を維持）
                             if display_scale is not None and display_scale < 1.0:
                                 inv = 1.0 / display_scale

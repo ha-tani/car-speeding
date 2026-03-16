@@ -62,3 +62,9 @@ SPEED_SMOOTHING_WINDOW = 15   # 速度スムージングのフレーム数
 SPEED_HISTORY_SIZE = 20       # 位置履歴の保持フレーム数
 SPEED_MIN_THRESHOLD_KMH = 3.0 # この速度以下は停車とみなす [km/h]
 SPEED_MIN_PIXEL_MOVEMENT = 3.0 # このピクセル以下の移動はノイズとみなす
+
+# -------------------------
+# 静止車両フィルタ設定
+# -------------------------
+STATIONARY_FILTER_FRAMES = 10  # 静止判定に使う位置履歴のフレーム数
+STATIONARY_MIN_DISPLACEMENT = 20 # この距離 [px] 未満の変位なら静止とみなす
