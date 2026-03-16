@@ -9,7 +9,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 
-YOLO_MODEL_PATH = MODELS_DIR / "yolov8n.pt"
+YOLO_MODEL_PATH = MODELS_DIR / "yolov8s.pt"
 YOLO_PLATE_MODEL_PATH = MODELS_DIR / "yolov8n-np.pt"  # ナンバープレート検出専用モデル
 FAST_PLATE_OCR_MODEL_DIR = MODELS_DIR / "fast-plate-ocr"  # fast-plate-ocrモデル保存先
 
@@ -48,6 +48,7 @@ PLATE_BBOX_THICKNESS = 2
 # UI設定
 # -------------------------
 WINDOW_NAME = "Vehicle Player"
+RIBBON_HEIGHT = 110      # 画面上部リボンの高さ
 SEEKBAR_HEIGHT = 40  # シークバー領域の高さ
 BUTTON_AREA_HEIGHT = 40  # ボタン領域の高さ
 

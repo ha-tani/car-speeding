@@ -242,7 +242,7 @@ class PlateOCR:
         # === 14. ボーダー追加（OCR認識率向上のため周囲に白パディング）===
         pad = 10
         enhanced = cv2.copyMakeBorder(enhanced, pad, pad, pad, pad,
-                                       cv2.BORDER_CONSTANT, value=255)
+                                        cv2.BORDER_CONSTANT, value=255)
         
         # BGR変換（EasyOCR用）
         if len(enhanced.shape) == 2:
@@ -342,9 +342,10 @@ class PlateOCR:
         
         # --- 分類番号 (3桁) ---
         class_num = ""
+        pattern = re.compile(r'[0-9][0-9PXY][0-9ACFHKLMPXY]')
         for dp in digit_parts:
             cleaned = dp.replace('・', '').replace('·', '').replace('.', '')
-            if len(cleaned) == 3 and cleaned.isdigit():
+            if pattern.fullmatch(cleaned):
                 class_num = cleaned
                 break
         # 3桁が見つからない場合、1-3桁の最初の数字列を使用
