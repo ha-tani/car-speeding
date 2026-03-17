@@ -68,4 +68,4 @@ SPEED_MIN_PIXEL_MOVEMENT = 3.0 # このピクセル以下の移動はノイズ�
 # 静止車両フィルタ設定
 # -------------------------
 STATIONARY_FILTER_FRAMES = 10  # 静止判定に使う位置履歴のフレーム数
-STATIONARY_MIN_DISPLACEMENT = 20 # この距離 [px] 未満の変位なら静止とみなす
+STATIONARY_MIN_DISPLACEMENT = 0 # この距離 [px] 未満の変位なら静止とみなす

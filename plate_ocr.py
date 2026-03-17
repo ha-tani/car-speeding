@@ -1,21 +1,58 @@
 # plate_ocr.py
-# ナンバープレートOCR（EasyOCR版）
+# ナンバープレートOCR（EasyOCR / Tesseract 切り替え版）
 
 import cv2
 import numpy as np
+from PIL import Image
+
+# ============================================================
+# OCRエンジン切り替え変数
+#   "easyocr"   : EasyOCR (GPU対応、日本語精度高)
+#   "tesseract" : Tesseract OCR (軽量、GPU不要)
+# ============================================================
+OCR_ENGINE = "tesseract"
+
+_easyocr_available = False
+_pytesseract_available = False
 
 try:
-    import easyocr
+    import easyocr as _easyocr_module
+    _easyocr_available = True
 except ImportError:
-    raise ImportError("easyocr が必要です。pip install easyocr")
+    pass
+
+try:
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    _pytesseract_available = True
+except ImportError:
+    pass
 
 
 class PlateOCR:
-    def __init__(self):
-        # EasyOCR初期化（日本語と英語に対応）
-        print("初期化中: EasyOCR...")
-        self.reader = easyocr.Reader(['ja', 'en'], gpu=True)  # GPU使用
-        print("EasyOCR初期化完了")
+    def __init__(self, engine=None):
+        # エンジン選択（引数 > モジュール変数 > デフォルト）
+        self.engine = (engine or OCR_ENGINE).lower()
+
+        if self.engine == "easyocr":
+            if not _easyocr_available:
+                raise ImportError("easyocr が必要です。pip install easyocr")
+            print("初期化中: EasyOCR...")
+            self.reader = _easyocr_module.Reader(['ja', 'en'], gpu=True)
+            self._tess_config_full = None
+            self._tess_config_line = None
+            self._tess_config_word = None
+            print("EasyOCR初期化完了")
+        else:
+            if not _pytesseract_available:
+                raise ImportError("pytesseract が必要です。pip install pytesseract")
+            print("初期化中: Tesseract OCR...")
+            self.reader = None
+            # OEM 1=LSTMエンジン / PSM 6=ブロックテキスト / PSM 7=1行 / PSM 8=1単語
+            self._tess_config_full = '--oem 1 --psm 6 -l jpn+eng'
+            self._tess_config_line = '--oem 1 --psm 7 -l jpn+eng'
+            self._tess_config_word = '--oem 1 --psm 8 -l jpn+eng'
+            print("Tesseract OCR初期化完了")
         
         self.results = {}           # track_id -> plate_text
         self.plate_images = {}      # track_id -> ナンバープレートのクロップ画像
@@ -24,7 +61,7 @@ class PlateOCR:
         # 日本のナンバープレート最大文字数（特殊車両を除く）
         self.max_plate_chars = 11
         
-        # EasyOCR許可文字リスト（ナンバープレートに出現する文字のみ）
+        # 許可文字リスト（ナンバープレートに出現する文字のみ、後処理フィルタ用）
         self.plate_allowlist = (
             '0123456789・'
             'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん'
@@ -244,7 +281,7 @@ class PlateOCR:
         enhanced = cv2.copyMakeBorder(enhanced, pad, pad, pad, pad,
                                         cv2.BORDER_CONSTANT, value=255)
         
-        # BGR変換（EasyOCR用）
+        # BGR変換（表示用）
         if len(enhanced.shape) == 2:
             enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
         
@@ -493,136 +530,134 @@ class PlateOCR:
         return ''.join(c for c in text if c in allowed)
 
     def _run_ocr(self, image, use_allowlist=True):
-        """EasyOCRを最適設定で実行しテキストを返す"""
-        kwargs = {
-            'detail': 0,
-            'paragraph': False,
-            'text_threshold': 0.35,
-            'low_text': 0.25,
-            'link_threshold': 0.3,
-            'mag_ratio': 1.5,
-            'slope_ths': 0.3,
-            'width_ths': 0.7,
-        }
-        if use_allowlist:
-            kwargs['allowlist'] = self.plate_allowlist
-        
-        results = self.reader.readtext(image, **kwargs)
-        return ' '.join(results) if results else ""
+        """テキストを認識し返す（エンジンに応じて切り替え）"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+        try:
+            if self.engine == "easyocr":
+                allowlist = self.plate_allowlist if use_allowlist else None
+                results = self.reader.readtext(gray, allowlist=allowlist, detail=1)
+                return ' '.join(text for _, text, _ in results).strip()
+            else:
+                pil_img = Image.fromarray(gray)
+                text = pytesseract.image_to_string(pil_img, config=self._tess_config_full).strip()
+            return self._post_filter(text) if use_allowlist else text
+        except Exception:
+            return ""
 
     def _run_ocr_with_boxes(self, image, use_allowlist=True):
-        """EasyOCRをdetail付きで実行し、上段/下段を分離してテキストを返す"""
-        kwargs = {
-            'detail': 1,
-            'paragraph': False,
-            'text_threshold': 0.35,
-            'low_text': 0.25,
-            'link_threshold': 0.3,
-            'mag_ratio': 1.5,
-            'slope_ths': 0.3,
-            'width_ths': 0.7,
-        }
-        if use_allowlist:
-            kwargs['allowlist'] = self.plate_allowlist
-        
-        results = self.reader.readtext(image, **kwargs)
-        if not results:
-            return ""
-        
-        # 各検出結果の中心Y座標で上段/下段に分類
-        h = image.shape[0]
-        mid_y = h / 3  # 上1:下2 の境界
-        
+        """バウンディングボックス付きOCRで上段/下段を分離してテキストを返す（エンジン切り替え対応）"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+        h = gray.shape[0]
+        mid_y = h / 3
         upper_texts = []
         lower_texts = []
-        for (bbox, text, conf) in results:
-            # bboxは [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-            center_y = sum(p[1] for p in bbox) / 4
-            if center_y < mid_y:
-                upper_texts.append((sum(p[0] for p in bbox) / 4, text))  # (center_x, text)
+
+        try:
+            if self.engine == "easyocr":
+                allowlist = self.plate_allowlist if use_allowlist else None
+                results = self.reader.readtext(gray, allowlist=allowlist, detail=1)
+                for bbox, text, _ in results:
+                    if not text.strip():
+                        continue
+                    center_y = (bbox[0][1] + bbox[2][1]) / 2
+                    center_x = (bbox[0][0] + bbox[2][0]) / 2
+                    if center_y < mid_y:
+                        upper_texts.append((center_x, text.strip()))
+                    else:
+                        lower_texts.append((center_x, text.strip()))
             else:
-                lower_texts.append((sum(p[0] for p in bbox) / 4, text))
-        
-        # X座標で左→右にソート
+                pil_img = Image.fromarray(gray)
+                data = pytesseract.image_to_data(
+                    pil_img, config=self._tess_config_full,
+                    output_type=pytesseract.Output.DICT
+                )
+                for i in range(len(data['text'])):
+                    text = data['text'][i].strip()
+                    if not text:
+                        continue
+                    center_y = data['top'][i] + data['height'][i] / 2
+                    center_x = data['left'][i] + data['width'][i] / 2
+                    if center_y < mid_y:
+                        upper_texts.append((center_x, text))
+                    else:
+                        lower_texts.append((center_x, text))
+        except Exception:
+            return ""
+
         upper_texts.sort(key=lambda x: x[0])
         lower_texts.sort(key=lambda x: x[0])
-        
+
         upper = ' '.join(t for _, t in upper_texts)
         lower = ' '.join(t for _, t in lower_texts)
-        
-        return f"{upper} {lower}" if upper or lower else ""
+
+        result = f"{upper} {lower}" if upper or lower else ""
+        if self.engine != "easyocr" and use_allowlist:
+            result = self._post_filter(result)
+        return result
 
     def _run_ocr_split(self, image, use_allowlist=True):
         """画像を上1:下2の高さ比で物理的に分割してOCR
-        
+
         ナンバープレートの上段(地域名+分類番号)と下段(ひらがな+登録番号)を
         別々にクロップしてOCRすることで精度を向上させる。
-        
-        下段はさらに左右に分割し、領域別の許可文字を適用：
-          左部分（幅の約20%）: ひらがな1文字のみ許可
-          右部分（幅の約80%）: 数字とハイフンのみ許可
-        
+
+        下段はさらに左右に分割し、領域別のTesseract設定を適用：
+          左部分（幅の約20%）: ひらがな1文字想定
+          右部分（幅の約80%）: 数字・ハイフン想定
+
         Returns:
             str: "上段テキスト\n下段テキスト" 形式
         """
         h, w = image.shape[:2]
         if h < 6 or w < 6:
             return ""
-        
+
         # 上段: 高さの1/3
         split_y = h // 3
         upper_crop = image[0:split_y, :]
         # 下段: 高さの2/3
         lower_crop = image[split_y:, :]
-        
+
         # 下段の左右分割（左約20%: ひらがな、右約80%: 一連指定番号）
         kana_split_x = max(1, w // 5)
-        lower_kana_crop = lower_crop[:, :kana_split_x]
+        lower_kana_crop   = lower_crop[:, :kana_split_x]
         lower_serial_crop = lower_crop[:, kana_split_x:]
-        
-        base_kwargs = {
-            'detail': 0,
-            'paragraph': False,
-            'text_threshold': 0.35,
-            'low_text': 0.25,
-            'link_threshold': 0.3,
-            'mag_ratio': 1.5,
-            'slope_ths': 0.3,
-            'width_ths': 0.7,
-        }
-        
-        # 上段OCR（既存の許可文字リストを使用）
-        upper_kwargs = dict(base_kwargs)
-        if use_allowlist:
-            upper_kwargs['allowlist'] = self.plate_allowlist
-        try:
-            upper_results = self.reader.readtext(upper_crop, **upper_kwargs)
-            upper_text = ' '.join(upper_results) if upper_results else ""
-        except Exception:
-            upper_text = ""
-        
-        # 下段左OCR（ひらがなのみ許可）
-        kana_kwargs = dict(base_kwargs)
-        if use_allowlist:
-            kana_kwargs['allowlist'] = self._HIRAGANA_ALLOWLIST
-        try:
-            kana_results = self.reader.readtext(lower_kana_crop, **kana_kwargs)
-            kana_text = ' '.join(kana_results) if kana_results else ""
-        except Exception:
-            kana_text = ""
-        
-        # 下段右OCR（数字とハイフンのみ許可）
-        serial_kwargs = dict(base_kwargs)
-        if use_allowlist:
-            serial_kwargs['allowlist'] = self._SERIAL_ALLOWLIST
-        try:
-            serial_results = self.reader.readtext(lower_serial_crop, **serial_kwargs)
-            serial_text = ' '.join(serial_results) if serial_results else ""
-        except Exception:
-            serial_text = ""
-        
+
+        def _tess(crop, config):
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop.copy()
+            pil_img = Image.fromarray(gray)
+            try:
+                return pytesseract.image_to_string(pil_img, config=config).strip()
+            except Exception:
+                return ""
+
+        def _easy(crop, allowlist=None):
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop.copy()
+            try:
+                results = self.reader.readtext(gray, allowlist=allowlist, detail=1)
+                return ' '.join(text for _, text, _ in results).strip()
+            except Exception:
+                return ""
+
+        if self.engine == "easyocr":
+            al = self.plate_allowlist if use_allowlist else None
+            upper_text  = _easy(upper_crop,        al)
+            kana_text   = _easy(lower_kana_crop,   self._HIRAGANA_ALLOWLIST if use_allowlist else None)
+            serial_text = _easy(lower_serial_crop, self._SERIAL_ALLOWLIST if use_allowlist else None)
+        else:
+            upper_text  = _tess(upper_crop,        self._tess_config_line)
+            kana_text   = _tess(lower_kana_crop,   self._tess_config_word)
+            serial_text = _tess(lower_serial_crop, self._tess_config_line)
+            if use_allowlist:
+                al_full   = set(self.plate_allowlist) | {' ', '\n', '-'}
+                al_kana   = set(self._HIRAGANA_ALLOWLIST) | {' '}
+                al_serial = set(self._SERIAL_ALLOWLIST) | {' ', '-'}
+                upper_text  = ''.join(c for c in upper_text  if c in al_full)
+                kana_text   = ''.join(c for c in kana_text   if c in al_kana)
+                serial_text = ''.join(c for c in serial_text if c in al_serial)
+
         lower_text = f"{kana_text} {serial_text}".strip()
-        
+
         if upper_text or lower_text:
             return f"{upper_text}\n{lower_text}"
         return ""
@@ -649,9 +684,9 @@ class PlateOCR:
         candidates.append(self._run_ocr_with_boxes(ocr_img, use_allowlist=True))
         candidates.append(self._run_ocr_split(ocr_img, use_allowlist=True))
         # allowlistなし + 後処理フィルタ (案3)
-        raw_no_al = self._run_ocr(ocr_img, use_allowlist=False)
-        candidates.append(raw_no_al)
-        candidates.append(self._post_filter(raw_no_al))
+     #   raw_no_al = self._run_ocr(ocr_img, use_allowlist=False)
+     #   candidates.append(raw_no_al)
+     #   candidates.append(self._post_filter(raw_no_al))
 
         if inv is not None:
             ocr_inv = self._resize_to_original(inv, orig_size)
@@ -882,10 +917,16 @@ class PlateOCR:
         
         # 通常のOCR（段階的補正なし）
         try:
-            # EasyOCRで認識
-            results = self.reader.readtext(plate_crop, detail=0, paragraph=False)
-            plate_text = ''.join(results) if results else ""
-            
+            gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY) if len(plate_crop.shape) == 3 else plate_crop
+            if self.engine == "easyocr":
+                results = self.reader.readtext(gray, detail=1)
+                plate_text = ' '.join(text for _, text, _ in results).strip()
+            else:
+                pil_img = Image.fromarray(gray)
+                plate_text = self._post_filter(
+                    pytesseract.image_to_string(pil_img, config=self._tess_config_full).strip()
+                )
+
             self.results[track_id] = plate_text
             self.plate_images[track_id] = plate_crop.copy()
                 
