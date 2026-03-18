@@ -142,7 +142,16 @@ class YoloDetector:
                     plate_y1 = int(y1 + py1)
                     plate_x2 = int(x1 + px2)
                     plate_y2 = int(y1 + py2)
-                    
+
+                    # 余白を追加（プレート輪郭が確実に収まるよう広げる）
+                    pad_x = max(8, int((plate_x2 - plate_x1) * 0.10))
+                    pad_y = max(6, int((plate_y2 - plate_y1) * 0.16))
+                    fh, fw = frame.shape[:2]
+                    plate_x1 = max(0, plate_x1 - pad_x)
+                    plate_y1 = max(0, plate_y1 - pad_y)
+                    plate_x2 = min(fw, plate_x2 + pad_x)
+                    plate_y2 = min(fh, plate_y2 + pad_y)
+
                     return (plate_x1, plate_y1, plate_x2, plate_y2)
         except Exception as e:
             print(f"Plate detection error: {e}")

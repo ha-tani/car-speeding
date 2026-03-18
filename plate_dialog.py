@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
 import cv2
+import numpy as np
 
 
 class PlateDialog:
@@ -23,6 +24,9 @@ class PlateDialog:
         self.invert_var = None      # 白黒反転チェックボックス
         self.is_closed = False
         self.current_enhanced = None  # 現在の補正画像
+        self._manual_pts = []           # 4点クリック [(x,y)...] オリジナル画像座標
+        self._pts_status_label = None   # クリック状態ヒントラベル
+        self._orig_display_scale = 1.0  # オリジナル画像の表示倍率
     
     def _bgr_to_photo(self, image):
         """BGR画像をそのままのサイズでPhotoImageに変換"""
@@ -104,6 +108,126 @@ class PlateDialog:
             self.text_label.config(text="OCRエラー")
             self.progress_label.config(text="処理失敗")
 
+    # ================================================================
+    # 4点クリック透視変換
+    # ================================================================
+    def _show_annotated_original(self):
+        """クリック点と輪郭線を描画したオリジナル画像を左パネルに表示する"""
+        vis = self.original_crop.copy()
+        corner_labels = ["\u2460TL", "\u2461TR", "\u2462BR", "\u2463BL"]
+        colors_bgr = [(0, 200, 0), (0, 200, 255), (255, 165, 0), (255, 0, 200)]
+        for i, (px, py) in enumerate(self._manual_pts):
+            ipt = (int(px), int(py))
+            cv2.circle(vis, ipt, 1, colors_bgr[i], -1)
+            cv2.circle(vis, ipt, 1, (255, 255, 255), 1)
+            cv2.putText(vis, corner_labels[i], (ipt[0] + 3, ipt[1] - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, colors_bgr[i], 1, cv2.LINE_AA)
+        if len(self._manual_pts) >= 2:
+            for i in range(len(self._manual_pts) - 1):
+                cv2.line(vis,
+                         (int(self._manual_pts[i][0]),     int(self._manual_pts[i][1])),
+                         (int(self._manual_pts[i+1][0]),   int(self._manual_pts[i+1][1])),
+                         (0, 200, 0), 1, cv2.LINE_AA)
+        if len(self._manual_pts) == 4:
+            cv2.line(vis,
+                     (int(self._manual_pts[3][0]), int(self._manual_pts[3][1])),
+                     (int(self._manual_pts[0][0]), int(self._manual_pts[0][1])),
+                     (0, 200, 0), 1, cv2.LINE_AA)
+        sc = self._orig_display_scale
+        if sc > 1.0:
+            vis = cv2.resize(vis,
+                             (int(vis.shape[1] * sc), int(vis.shape[0] * sc)),
+                             interpolation=cv2.INTER_NEAREST)
+        photo = self._bgr_to_photo(vis)
+        if photo and self.original_label:
+            self.original_label.config(image=photo, width=photo.width(), height=photo.height())
+            self.original_label.image = photo
+
+    def _update_pts_hint(self):
+        """クリック状態ヒントラベルを更新する"""
+        if self._pts_status_label is None:
+            return
+        hints = [
+            "\u2460 \u5de6\u4e0a(TL)\u3092\u30af\u30ea\u30c3\u30af",
+            "\u2461 \u53f3\u4e0a(TR)\u3092\u30af\u30ea\u30c3\u30af",
+            "\u2462 \u53f3\u4e0b(BR)\u3092\u30af\u30ea\u30c3\u30af",
+            "\u2463 \u5de6\u4e0b(BL)\u3092\u30af\u30ea\u30c3\u30af",
+            "\u2713 \u88dc\u6b63\u5b8c\u4e86  (\u30ea\u30bb\u30c3\u30c8\u3067\u518d\u8a66\u884c)",
+        ]
+        self._pts_status_label.config(text=hints[len(self._manual_pts)])
+
+    def _on_orig_click(self, event):
+        """オリジナル画像クリックで4点を収集し、4点揃ったら透視変換を適用する"""
+        if self.is_closed or len(self._manual_pts) >= 4:
+            return
+        sc = self._orig_display_scale
+        self._manual_pts.append((event.x / sc, event.y / sc))
+        self._show_annotated_original()
+        self._update_pts_hint()
+        if len(self._manual_pts) == 4:
+            self._apply_4pts_correction()
+
+    def _apply_4pts_correction(self):
+        """クリックされた4点から透視変換を適用し補正画像を生成・OCRを実行する"""
+        if len(self._manual_pts) < 4:
+            return
+        pts = np.array(self._manual_pts, dtype=np.float32)
+        # 出力サイズ: 日本ナンバープレート 330×165mm のアスペクト比 2:1
+        dst_w, dst_h = 440, 220
+        dst = np.array(
+            [[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]],
+            dtype=np.float32)
+        try:
+            M = cv2.getPerspectiveTransform(pts, dst)
+            corrected = cv2.warpPerspective(self.original_crop, M, (dst_w, dst_h))
+        except Exception as e:
+            print(f"Perspective transform error: {e}")
+            return
+        
+        # 補正レベルプルダウンの選択値を使って 前処理(enhance_plate_image)を行う
+        level_str = self.level_combo.get()
+        if level_str != "オリジナル":
+             level = int(level_str.replace("Lv.", ""))
+             corrected = self.plate_ocr.enhance_plate_image(corrected, level=level)
+
+        self.current_enhanced = corrected
+
+        photo_enh = self._bgr_to_photo(corrected)
+        if photo_enh and self.image_label:
+            self.image_label.config(image=photo_enh,
+                                    width=photo_enh.width(), height=photo_enh.height())
+            self.image_label.image = photo_enh
+        # 440×220 画像をそのままOCR (orig_size=None でリサイズしない)
+        try:
+            candidates = self.plate_ocr._run_all_ocr_patterns(corrected)
+            best_text, best_score = self.plate_ocr._vote_candidates(candidates)
+            display_text = self.plate_ocr.format_japanese_plate(best_text)
+            char_count = self.plate_ocr.count_recognized_chars(best_text)
+            if self.text_label:
+                self.text_label.config(
+                    text=display_text if display_text else "認識できませんでした")
+            if self.progress_label:
+                self.progress_label.config(
+                    text=f"score: {best_score:.1f} | 認識文字数: {char_count}")
+        except Exception as e:
+            print(f"4点補正後OCRエラー: {e}")
+            if self.text_label:
+                self.text_label.config(text="OCRエラー")
+        if self.root:
+            self.root.update()
+
+    def _reset_manual_pts(self):
+        """クリックポイントをリセットし、元の表示に戻す"""
+        self._manual_pts = []
+        self._show_annotated_original()
+        self._update_pts_hint()
+        photo_raw = self._bgr_to_photo(self.original_crop)
+        if photo_raw and self.image_label:
+            self.image_label.config(image=photo_raw,
+                                    width=photo_raw.width(), height=photo_raw.height())
+            self.image_label.image = photo_raw
+        self.current_enhanced = self.original_crop.copy()
+
     def show(self):
         """ダイアログを表示"""
         if self.root is not None:
@@ -151,11 +275,16 @@ class PlateDialog:
                                        font=("Arial", 9), fg="#cccccc", bg="#2b2b2b",
                                        selectcolor="#1a1a1a", activebackground="#2b2b2b")
         invert_check.pack(side=tk.LEFT)
+
+        tk.Button(control_frame, text="4点リセット",
+                  command=self._reset_manual_pts,
+                  font=("Arial", 9), bg="#555555", fg="#ffffff",
+                  activebackground="#666666", padx=6).pack(side=tk.LEFT, padx=(10, 0))
         
         # 進捗表示
         self.progress_label = tk.Label(
             main_frame,
-            text="補正レベルを選択してOCRを実行",
+            text="OCR実行中...",
             font=("Arial", 9),
             fg="#aaaaaa",
             bg="#2b2b2b"
@@ -170,16 +299,22 @@ class PlateDialog:
         orig_frame = tk.Frame(image_container, bg="#2b2b2b")
         orig_frame.pack(side=tk.LEFT, padx=(0, 5))
         
-        orig_title = tk.Label(orig_frame, text="オリジナル", font=("Arial", 9, "bold"),
-                              fg="#cccccc", bg="#2b2b2b")
+        orig_title = tk.Label(orig_frame, text="オリジナル  (4点クリックで補正)",
+                              font=("Arial", 9, "bold"), fg="#cccccc", bg="#2b2b2b")
         orig_title.pack()
-        
+
+        self._pts_status_label = tk.Label(orig_frame, text="\u2460 左上(TL)をクリック",
+                                          font=("Arial", 8), fg="#ffcc00", bg="#2b2b2b")
+        self._pts_status_label.pack()
+
         orig_border = tk.Frame(orig_frame, bg="#555555", bd=0)
         orig_border.pack()
-        
+
         self.original_label = tk.Label(orig_border, bg="#1a1a1a")
         self.original_label.pack(padx=2, pady=2)
-        
+        self.original_label.bind("<Button-1>", self._on_orig_click)
+        self.original_label.config(cursor="crosshair")
+
         # 右: 補正画像
         enh_frame = tk.Frame(image_container, bg="#2b2b2b")
         enh_frame.pack(side=tk.LEFT, padx=(5, 0))
@@ -194,14 +329,29 @@ class PlateDialog:
         self.image_label = tk.Label(enh_border, bg="#1a1a1a")
         self.image_label.pack(padx=2, pady=2)
         
-        # 初期表示：オリジナル画像を両方に表示
-        photo_orig = self._bgr_to_photo(self.original_crop)
-        if photo_orig:
-            self.original_label.config(image=photo_orig, width=photo_orig.width(), height=photo_orig.height())
-            self.original_label.image = photo_orig
-            self.image_label.config(image=photo_orig, width=photo_orig.width(), height=photo_orig.height())
-            self.image_label.image = photo_orig
-        
+        # 表示スケールを計算（幅が300px未満なら拡大してクリックしやすくする）
+        ih, iw = self.original_crop.shape[:2]
+        self._orig_display_scale = max(1.0, 300.0 / max(iw, 1))
+
+        # 初期表示：左はスケールアップ（クリックしやすくするため）、右はオリジナルサイズ
+        if self._orig_display_scale > 1.0:
+            disp_w = int(iw * self._orig_display_scale)
+            disp_h = int(ih * self._orig_display_scale)
+            disp_orig = cv2.resize(self.original_crop, (disp_w, disp_h),
+                                   interpolation=cv2.INTER_NEAREST)
+        else:
+            disp_orig = self.original_crop
+        photo_disp = self._bgr_to_photo(disp_orig)
+        photo_raw  = self._bgr_to_photo(self.original_crop)
+        if photo_disp:
+            self.original_label.config(image=photo_disp,
+                                       width=photo_disp.width(), height=photo_disp.height())
+            self.original_label.image = photo_disp
+        if photo_raw:
+            self.image_label.config(image=photo_raw,
+                                    width=photo_raw.width(), height=photo_raw.height())
+            self.image_label.image = photo_raw
+
         self.current_enhanced = self.original_crop.copy()
         
         # ===== OCR結果テキスト =====
@@ -219,7 +369,7 @@ class PlateDialog:
         
         self.text_label = tk.Label(
             text_frame,
-            text="補正レベルを選択してください",
+            text="OCR実行中...",
             font=("MS Gothic", 14, "bold"),
             fg="#00ff00",
             bg="#1a1a1a",
@@ -252,6 +402,9 @@ class PlateDialog:
         # 初期描画を強制実行
         self.root.update_idletasks()
         self.root.update()
+        
+        # オリジナル画像でOCRを自動実行
+        self.root.after(100, self._on_level_changed)
     
     def process_events(self):
         """Tkinterイベントを処理（メインループから定期的に呼び出す）"""
