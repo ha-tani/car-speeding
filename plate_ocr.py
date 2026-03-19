@@ -114,70 +114,6 @@ class PlateOCR:
             '沖縄那覇'
         )
     
-    def deskew_image(self, image):
-        """画像の傾きを自動補正"""
-        # グレースケールで処理
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-
-        h, w = gray.shape[:2]
-
-        # エッジ検出
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-         # エッジを繋げてから輪郭検出
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        edges = cv2.dilate(edges, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # 輪郭がない、または最大輪郭が画像面積の5%未満なら何もしない
-        if not contours:
-            return image
-        cnt = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(cnt) < h * w * 0.05:
-            return image
-
-        # epsilon を変えながら4頂点近似を試みる
-        four_pts = None
-        for eps_factor in [0.02, 0.05, 0.08, 0.10, 0.15]:
-            epsilon = eps_factor * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            if len(approx) == 4:
-                four_pts = approx.reshape(4, 2).astype("float32")
-                break
-
-        # 4頂点が得られない場合は minAreaRect でフォールバック
-        if four_pts is None:
-            box_rect = cv2.minAreaRect(cnt)
-            four_pts = cv2.boxPoints(box_rect).astype("float32")
-
-        # 頂点を top-left, top-right, bottom-right, bottom-left に整列
-        rect = np.zeros((4, 2), dtype="float32")
-        s = four_pts.sum(axis=1)
-        rect[0] = four_pts[np.argmin(s)]   # top-left
-        rect[2] = four_pts[np.argmax(s)]   # bottom-right
-        diff = np.diff(four_pts, axis=1)
-        rect[1] = four_pts[np.argmin(diff)]  # top-right
-        rect[3] = four_pts[np.argmax(diff)]  # bottom-left
-
-        # 日本のナンバープレートのアスペクト比 ≒ 2:1（標準サイズ 330×165mm）
-        dst_w, dst_h = 330, 165
-        dst = np.array([
-            [0,         0        ],
-            [dst_w - 1, 0        ],
-            [dst_w - 1, dst_h - 1],
-            [0,         dst_h - 1],
-        ], dtype="float32")
-
-        try:
-            M = cv2.getPerspectiveTransform(rect, dst)
-            return cv2.warpPerspective(image, M, (dst_w, dst_h))
-        except Exception:
-            return image
-    
     def _auto_white_balance(self, image):
         """簡易ホワイトバランス補正（BGR画像用）"""
         result = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -188,54 +124,84 @@ class PlateOCR:
         return cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
 
     def _adaptive_binarize(self, gray, level):
+
+        """グレースケールになっていない場合はここで変換する"""
+        if len(gray.shape) == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+
         """複数の二値化手法を試し、文字領域が最も鮮明なものを返す"""
         candidates = []
+
+        # 閾値
+        _, result = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
+        candidates.append(result)
         
         # Otsu
         _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         candidates.append(otsu)
         
-        # 適応的二値化 (Gaussian)
-        block = max(11, (gray.shape[1] // 8) | 1)  # 奇数にする
-        adapt_gauss = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 4 + level
-        )
-        candidates.append(adapt_gauss)
+        # # 適応的二値化 (Gaussian)
+        # block = max(11, (gray.shape[1] // 8) | 1)  # 奇数にする
+        # adapt_gauss = cv2.adaptiveThreshold(
+        #     gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 4 + level
+        # )
+        # candidates.append(adapt_gauss)
         
-        # 適応的二値化 (Mean)
-        adapt_mean = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, block, 6 + level
-        )
-        candidates.append(adapt_mean)
+        # # 適応的二値化 (Mean)
+        # adapt_mean = cv2.adaptiveThreshold(
+        #     gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, block, 6 + level
+        # )
+        # candidates.append(adapt_mean)
         
-        # 各候補のコントラスト（白と黒の分離度）で最適なものを選択
-        best = candidates[0]
-        best_score = 0
-        for c in candidates:
-            white_ratio = np.sum(c == 255) / c.size
-            # 白:黒が 30-70% の範囲内に近いほど良い
-            score = 1.0 - abs(white_ratio - 0.5) * 2
-            if score > best_score:
-                best_score = score
-                best = c
-        return best
+        # # 各候補のコントラスト（白と黒の分離度）で最適なものを選択
+        # best = candidates[0]
+        # best_score = 0
+        # for c in candidates:
+        #     white_ratio = np.sum(c == 255) / c.size
+        #     # 白:黒が 30-70% の範囲内に近いほど良い
+        #     score = 1.0 - abs(white_ratio - 0.5) * 2
+        #     if score > best_score:
+        #         best_score = score
+        #         best = c
+        return result[1]
 
-    def enhance_plate_image(self, image, level=1):
+    def enhance_plate_image(self, image, level=1, pts=None, dst_size=(440, 220)):
         """ナンバープレート画像をすべての補正を同時に段階的強度で適用
         
         全処理を常に実行し、レベルに応じて強度を段階的に調整：
-          リサイズ → ホワイトバランス → グレースケール → ノイズ除去 →
-          CLAHE → ガンマ → 正規化 → シャープ化 → 二値化 → モルフォロジー → 傾き補正
+          [透視変換] → グレースケール → 二値化
         
         Args:
-            image: 入力画像 (BGR)
-            level: 補正レベル (1-5)
+            image:    入力画像 (BGR)
+            level:    補正レベル (0=無補正, 1-5)
+            pts:      透視変換用4点座標リスト [(x,y)...] (TL→TR→BR→BL 順)
+                      指定時は最初に透視変換を実行する
+            dst_size: 透視変換後の出力サイズ (w, h)
         Returns:
             補正後の画像 (BGR)
         """
         if image is None or image.size == 0:
             return image
-        
+
+        enhanced = image.copy()
+        dst_w, dst_h = dst_size
+
+        # === 透視変換 ===
+        # pts が指定されていない場合は画像の4頂点をそのまま使用（dst_size へリサイズ）
+        if pts is None:
+            h, w = enhanced.shape[:2]
+            pts = [(0, 0), (w - 1, 0), (w - 1, h - 1), (0, h - 1)]
+        pts_arr = np.array(pts, dtype=np.float32)
+        dst_arr = np.array(
+            [[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]],
+            dtype=np.float32)
+        M = cv2.getPerspectiveTransform(pts_arr, dst_arr)
+        enhanced = cv2.warpPerspective(enhanced, M, (dst_w, dst_h))
+
+        # level=0 は透視変換のみで返す
+        if level == 0:
+            return enhanced
+
         # レベルに応じたパラメータ
         params = {
             1: {'scale': 3, 'denoise_h': 5,  'clahe': 1.5, 'gamma': 1.05, 'unsharp_sigma': 1.5, 'unsharp_w': 1.15, 'lap_w': 0.08, 'morph_k': 2, 'morph_i': 1},
@@ -245,88 +211,35 @@ class PlateOCR:
             5: {'scale': 5, 'denoise_h': 15, 'clahe': 4.5, 'gamma': 1.35, 'unsharp_sigma': 3.0, 'unsharp_w': 1.80, 'lap_w': 0.40, 'morph_k': 3, 'morph_i': 2},
         }
         p = params.get(level, params[3])
-        enhanced = image.copy()
 
         # グレースケール変換 #
-        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        if len(enhanced.shape) == 3:
+            enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        
+        # ノイズ除去 #
+        enhanced = cv2.GaussianBlur(enhanced, (3,3), 0)
+        
+        # 超解像リサイズ #
+        h, w = enhanced.shape[:2]
+        scale = p['scale']
+        interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
+        enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
 
-        # === 傾き補正 === #
-        enhanced = self.deskew_image(enhanced)
+        # 正規化（コントラスト調整） — uint8 を保証 #
+        enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
+        if enhanced.dtype != np.uint8:
+            enhanced = enhanced.astype(np.uint8)
 
+        # 二値化 #
+        enhanced = self._adaptive_binarize(enhanced, level)
+        
+        # BGR変換（表示・OCR共通） — 必ず 3ch BGR で返す
+        if enhanced is None or enhanced.size == 0 or len(enhanced.shape) < 2:
+            # フォールバック: 透視変換だけやり直して返す
+            enhanced = cv2.warpPerspective(image, M, (dst_w, dst_h))
+        elif len(enhanced.shape) == 2:
+            enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
-        
-        # # === 1. 超解像リサイズ (INTER_CUBIC → INTER_LANCZOS4 for higher levels) ===
-        # h, w = enhanced.shape[:2]
-        # scale = p['scale']
-        # interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
-        # enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
-        
-        # # === 2. ホワイトバランス補正（色かぶり除去）===
-        # enhanced = self._auto_white_balance(enhanced)
-        
-        # # === 3. グレースケール化 ===
-        # if len(enhanced.shape) == 3:
-        #     enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-        
-        # # === 4. ノイズ除去（Non-Local Means — 二値化前に行う）===
-        # denoise_h = p['denoise_h']
-        # enhanced = cv2.fastNlMeansDenoising(enhanced, None, h=denoise_h, templateWindowSize=7, searchWindowSize=21)
-        
-        # # === 5. CLAHE コントラスト改善 ===
-        # clahe = cv2.createCLAHE(clipLimit=p['clahe'], tileGridSize=(8, 8))
-        # enhanced = clahe.apply(enhanced)
-        
-        # # === 6. ガンマ補正 ===
-        # gamma = p['gamma']
-        # table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in range(256)]).astype('uint8')
-        # enhanced = cv2.LUT(enhanced, table)
-        
-        # # === 7. 正規化 ===
-        # enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
-        
-        # # === 8. Unsharp Masking ===
-        # sigma = p['unsharp_sigma']
-        # gaussian = cv2.GaussianBlur(enhanced, (0, 0), sigma)
-        # uw = p['unsharp_w']
-        # enhanced = cv2.addWeighted(enhanced, uw, gaussian, -(uw - 1.0), 0)
-        
-        # # === 9. Laplacian 鮮鋭化 ===
-        # lap = cv2.Laplacian(enhanced, cv2.CV_64F)
-        # lap = cv2.convertScaleAbs(lap)
-        # enhanced = cv2.addWeighted(enhanced, 1.0, lap, p['lap_w'], 0)
-        
-        # # === 10. メディアンブラー（二値化直前のソルト&ペッパーノイズ除去）===
-        # enhanced = cv2.medianBlur(enhanced, 3)
-        
-        # # === 11. 適応的二値化（Otsu + Adaptive の最良選択）===
-        # enhanced = self._adaptive_binarize(enhanced, level)
-        
-        # # === 12. モルフォロジー ===
-        # mk = p['morph_k']
-        # mi = p['morph_i']
-        # kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (mk, mk))
-        # enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel_close, iterations=mi)
-        # kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (max(mk - 1, 1), max(mk - 1, 1)))
-        # enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, kernel_open, iterations=mi)
-        
-        # # === 13. 傾き補正 ===
-        # enhanced = self.deskew_image(enhanced)
-        
-        # # === 14. ボーダー追加（OCR認識率向上のため周囲に白パディング）===
-        # pad = 10
-        # enhanced = cv2.copyMakeBorder(enhanced, pad, pad, pad, pad,
-        #                                 cv2.BORDER_CONSTANT, value=255)
-        
-        # # BGR変換（表示用）
-        # if len(enhanced.shape) == 2:
-        #     enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-
-
-
-
-
-
-        
         return enhanced
     
     # ===== 日本ナンバープレート地域名 =====

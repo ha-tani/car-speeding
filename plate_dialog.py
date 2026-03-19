@@ -52,9 +52,9 @@ class PlateDialog:
             # 白黒反転フラグ
             invert = self.invert_var.get()
             
-            # 補正画像を生成
+            # 補正画像を生成（OCR用はenhance後のサイズ、表示用は440×220に縮小）
             if level == 0:
-                enhanced = self.original_crop.copy()
+                enhanced = self.plate_ocr.enhance_plate_image(self.original_crop, level=0)
             else:
                 enhanced = self.plate_ocr.enhance_plate_image(self.original_crop, level=level)
             
@@ -63,14 +63,23 @@ class PlateDialog:
                 enhanced = cv2.bitwise_not(enhanced)
             
             self.current_enhanced = enhanced
+
+            # 表示用に 440×220 へ縮小
+            disp_w, disp_h = 440, 220
+            if enhanced is None or enhanced.size == 0:
+                return
+            if enhanced.shape[1] != disp_w or enhanced.shape[0] != disp_h:
+                display_img = cv2.resize(enhanced, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+            else:
+                display_img = enhanced
             
-            # 補正画像を表示更新
-            photo_enh = self._bgr_to_photo(enhanced)
+            # 補正画像を表示更新（440×220）
+            photo_enh = self._bgr_to_photo(display_img)
             if photo_enh:
                 self.image_label.config(image=photo_enh, width=photo_enh.width(), height=photo_enh.height())
                 self.image_label.image = photo_enh
             
-            # OCR実行
+            # OCR実行（超解像拡大済みのサイズで実行）
             self._run_ocr(enhanced)
             
             self.root.update()
@@ -82,12 +91,8 @@ class PlateDialog:
     def _run_ocr(self, image):
         """指定された画像にOCRを実行し結果を表示"""
         try:
-            # 元のクロップサイズにリサイズ（OCR用）
-            orig_size = (self.original_crop.shape[0], self.original_crop.shape[1])
-            ocr_img = self.plate_ocr._resize_to_original(image, orig_size)
-            
             # 全OCRパターンを実行し多数決で最良候補を選択
-            candidates = self.plate_ocr._run_all_ocr_patterns(ocr_img)
+            candidates = self.plate_ocr._run_all_ocr_patterns(image)
             best_text, best_score = self.plate_ocr._vote_candidates(candidates)
             
             # テキストを整形して表示
@@ -114,7 +119,7 @@ class PlateDialog:
     def _show_annotated_original(self):
         """クリック点と輪郭線を描画したオリジナル画像を左パネルに表示する"""
         vis = self.original_crop.copy()
-        corner_labels = ["\u2460TL", "\u2461TR", "\u2462BR", "\u2463BL"]
+        corner_labels = ["TL", "TR", "BR", "BL"]
         colors_bgr = [(0, 200, 0), (0, 200, 255), (255, 165, 0), (255, 0, 200)]
         for i, (px, py) in enumerate(self._manual_pts):
             ipt = (int(px), int(py))
@@ -168,38 +173,43 @@ class PlateDialog:
             self._apply_4pts_correction()
 
     def _apply_4pts_correction(self):
-        """クリックされた4点から透視変換を適用し補正画像を生成・OCRを実行する"""
+        """クリックされた4点を enhance_plate_image に渡し
+        透視変換 → enhance補正 → OCR の流れで実行する"""
         if len(self._manual_pts) < 4:
             return
-        pts = np.array(self._manual_pts, dtype=np.float32)
-        # 出力サイズ: 日本ナンバープレート 330×165mm のアスペクト比 2:1
-        dst_w, dst_h = 440, 220
-        dst = np.array(
-            [[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]],
-            dtype=np.float32)
-        try:
-            M = cv2.getPerspectiveTransform(pts, dst)
-            corrected = cv2.warpPerspective(self.original_crop, M, (dst_w, dst_h))
-        except Exception as e:
-            print(f"Perspective transform error: {e}")
-            return
-        
-        # 補正レベルプルダウンの選択値を使って 前処理(enhance_plate_image)を行う
+
         level_str = self.level_combo.get()
-        if level_str != "オリジナル":
-             level = int(level_str.replace("Lv.", ""))
-             corrected = self.plate_ocr.enhance_plate_image(corrected, level=level)
+        level = 0 if level_str == "オリジナル" else int(level_str.replace("Lv.", ""))
 
-        self.current_enhanced = corrected
+        try:
+            # 透視変換 + 画像補正を enhance_plate_image に一任（OCR用の大きいサイズが返る）
+            enhanced = self.plate_ocr.enhance_plate_image(
+                self.original_crop, level=level, pts=self._manual_pts)
+        except Exception as e:
+            print(f"Perspective transform / enhance error: {e}")
+            return
 
-        photo_enh = self._bgr_to_photo(corrected)
+        self.current_enhanced = enhanced
+
+        # 表示用に 440×220 へ縮小
+        disp_w, disp_h = 440, 220
+        if enhanced is None or enhanced.size == 0:
+            return
+        if enhanced.shape[1] != disp_w or enhanced.shape[0] != disp_h:
+            display_img = cv2.resize(enhanced, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+        else:
+            display_img = enhanced
+
+        # 右パネルに補正画像を表示（440×220）
+        photo_enh = self._bgr_to_photo(display_img)
         if photo_enh and self.image_label:
             self.image_label.config(image=photo_enh,
                                     width=photo_enh.width(), height=photo_enh.height())
             self.image_label.image = photo_enh
-        # 440×220 画像をそのままOCR (orig_size=None でリサイズしない)
+
+        # OCR実行（超解像拡大済みのサイズで実行）
         try:
-            candidates = self.plate_ocr._run_all_ocr_patterns(corrected)
+            candidates = self.plate_ocr._run_all_ocr_patterns(enhanced)
             best_text, best_score = self.plate_ocr._vote_candidates(candidates)
             display_text = self.plate_ocr.format_japanese_plate(best_text)
             char_count = self.plate_ocr.count_recognized_chars(best_text)
