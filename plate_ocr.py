@@ -123,22 +123,22 @@ class PlateOCR:
         result[:, :, 2] = result[:, :, 2] - ((avg_b - 128) * (result[:, :, 0] / 255.0) * 1.1)
         return cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
 
-    def _adaptive_binarize(self, gray, level):
+    def _adaptive_binarize(self, gray, level, thresh=120):
 
         """グレースケールになっていない場合はここで変換する"""
         if len(gray.shape) == 3:
             gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
 
         """複数の二値化手法を試し、文字領域が最も鮮明なものを返す"""
-        candidates = []
+        # candidates = []
 
         # 閾値
-        _, result = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
+        _, result = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
         candidates.append(result)
         
-        # Otsu
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        candidates.append(otsu)
+        # # Otsu
+        # _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # candidates.append(otsu)
         
         # # 適応的二値化 (Gaussian)
         # block = max(11, (gray.shape[1] // 8) | 1)  # 奇数にする
@@ -163,20 +163,28 @@ class PlateOCR:
         #     if score > best_score:
         #         best_score = score
         #         best = c
-        return result[1]
+        return result
 
-    def enhance_plate_image(self, image, level=1, pts=None, dst_size=(440, 220)):
+    def enhance_plate_image(self, image, level=1, pts=None, dst_size=(440, 220),
+                            use_grayscale=True, use_denoise=True, use_superres=True,
+                            use_normalize=True, use_binarize=True, binarize_thresh=120):
         """ナンバープレート画像をすべての補正を同時に段階的強度で適用
         
         全処理を常に実行し、レベルに応じて強度を段階的に調整：
           [透視変換] → グレースケール → 二値化
         
         Args:
-            image:    入力画像 (BGR)
-            level:    補正レベル (0=無補正, 1-5)
-            pts:      透視変換用4点座標リスト [(x,y)...] (TL→TR→BR→BL 順)
-                      指定時は最初に透視変換を実行する
-            dst_size: 透視変換後の出力サイズ (w, h)
+            image:         入力画像 (BGR)
+            level:         補正レベル (0=無補正, 1-5)
+            pts:           透視変換用4点座標リスト [(x,y)...] (TL→TR→BR→BL 順)
+                           指定時は最初に透視変換を実行する
+            dst_size:      透視変換後の出力サイズ (w, h)
+            use_grayscale: グレースケール変換を行うか
+            use_denoise:   ノイズ除去を行うか
+            use_superres:  超解像リサイズを行うか
+            use_normalize: 正規化（コントラスト調整）を行うか
+            use_binarize:  二値化を行うか
+            binarize_thresh: 二値化の閾値 (0-255)
         Returns:
             補正後の画像 (BGR)
         """
@@ -213,25 +221,43 @@ class PlateOCR:
         p = params.get(level, params[3])
 
         # グレースケール変換 #
-        if len(enhanced.shape) == 3:
+        if use_grayscale and len(enhanced.shape) == 3:
             enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
         
         # ノイズ除去 #
-        enhanced = cv2.GaussianBlur(enhanced, (3,3), 0)
-        
-        # 超解像リサイズ #
-        h, w = enhanced.shape[:2]
-        scale = p['scale']
-        interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
-        enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
+        if use_denoise:
+            enhanced = cv2.GaussianBlur(enhanced, (3,3), 0)
 
         # 正規化（コントラスト調整） — uint8 を保証 #
-        enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
-        if enhanced.dtype != np.uint8:
-            enhanced = enhanced.astype(np.uint8)
+        if use_normalize:
+            enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
+            if enhanced.dtype != np.uint8:
+                enhanced = enhanced.astype(np.uint8)
+        
+        # 超解像リサイズ #
+        if use_superres:
+            # h, w = enhanced.shape[:2]
+            # scale = p['scale']
+            # interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
+            # enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
+
+            # グレースケールになっている場合はBGR変換する
+            if len(enhanced.shape) == 2:
+                enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+            # ① モデル読み込み
+            sr = cv2.dnn_superres.DnnSuperResImpl_create()
+            sr.readModel("EDSR_x2.pb")   # ← モデルファイル
+
+            # ② モデル設定
+            sr.setModel("edsr", 2)       # ← "edsr" と scale（2 or 3 or 4）
+
+            # ④ 超解像
+            enhanced = sr.upsample(enhanced)
 
         # 二値化 #
-        enhanced = self._adaptive_binarize(enhanced, level)
+        if use_binarize:
+            enhanced = self._adaptive_binarize(enhanced, level, thresh=binarize_thresh)
         
         # BGR変換（表示・OCR共通） — 必ず 3ch BGR で返す
         if enhanced is None or enhanced.size == 0 or len(enhanced.shape) < 2:
@@ -239,6 +265,11 @@ class PlateOCR:
             enhanced = cv2.warpPerspective(image, M, (dst_w, dst_h))
         elif len(enhanced.shape) == 2:
             enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+        # デバッグ用
+        print("RETURN TYPE:", type(enhanced))
+        print("SHAPE:", getattr(enhanced, "shape", None))
+        print("NDIM:", getattr(enhanced, "ndim", None))
 
         return enhanced
     

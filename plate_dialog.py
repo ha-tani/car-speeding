@@ -27,6 +27,14 @@ class PlateDialog:
         self._manual_pts = []           # 4点クリック [(x,y)...] オリジナル画像座標
         self._pts_status_label = None   # クリック状態ヒントラベル
         self._orig_display_scale = 1.0  # オリジナル画像の表示倍率
+        # 処理ステップ制御
+        self.grayscale_var = None
+        self.denoise_var = None
+        self.superres_var = None
+        self.normalize_var = None
+        self.binarize_var = None
+        self.binarize_thresh_var = None
+        self._thresh_entry = None
     
     def _bgr_to_photo(self, image):
         """BGR画像をそのままのサイズでPhotoImageに変換"""
@@ -52,11 +60,10 @@ class PlateDialog:
             # 白黒反転フラグ
             invert = self.invert_var.get()
             
-            # 補正画像を生成（OCR用はenhance後のサイズ、表示用は440×220に縮小）
-            if level == 0:
-                enhanced = self.plate_ocr.enhance_plate_image(self.original_crop, level=0)
-            else:
-                enhanced = self.plate_ocr.enhance_plate_image(self.original_crop, level=level)
+             # 補正画像を生成（4点が選択済みならその形状を使用）
+            pts = self._manual_pts if len(self._manual_pts) == 4 else None
+            enhanced = self.plate_ocr.enhance_plate_image(
+                self.original_crop, level=level, pts=pts, **self._get_proc_kwargs())
             
             # 白黒反転
             if invert:
@@ -87,6 +94,30 @@ class PlateDialog:
             print(f"Level change error: {e}")
             import traceback
             traceback.print_exc()
+
+    def _get_proc_kwargs(self):
+        """現在の処理ステップ設定を dict で返す"""
+        thresh = 120
+        if self.binarize_thresh_var:
+            try:
+                thresh = max(0, min(255, int(self.binarize_thresh_var.get())))
+            except ValueError:
+                thresh = 120
+        return {
+            'use_grayscale': self.grayscale_var.get() if self.grayscale_var else True,
+            'use_denoise':   self.denoise_var.get()   if self.denoise_var   else True,
+            'use_superres':  self.superres_var.get()  if self.superres_var  else True,
+            'use_normalize': self.normalize_var.get() if self.normalize_var else True,
+            'use_binarize':  self.binarize_var.get()  if self.binarize_var  else True,
+            'binarize_thresh': thresh,
+        }
+
+    def _on_binarize_check_changed(self):
+        """二値化チェック変更時: 閾値入力欄の有効/無効を切り替えてOCR再実行"""
+        if self._thresh_entry:
+            state = tk.NORMAL if self.binarize_var.get() else tk.DISABLED
+            self._thresh_entry.config(state=state)
+        self._on_level_changed()
 
     def _run_ocr(self, image):
         """指定された画像にOCRを実行し結果を表示"""
@@ -184,14 +215,15 @@ class PlateDialog:
         try:
             # 透視変換 + 画像補正を enhance_plate_image に一任（OCR用の大きいサイズが返る）
             enhanced = self.plate_ocr.enhance_plate_image(
-                self.original_crop, level=level, pts=self._manual_pts)
+                self.original_crop, level=level, pts=self._manual_pts,
+                **self._get_proc_kwargs())
         except Exception as e:
             print(f"Perspective transform / enhance error: {e}")
             return
 
         self.current_enhanced = enhanced
 
-        # 表示用に 440×220 へ縮小
+        # 表示用の画像サイズは440×220にする
         disp_w, disp_h = 440, 220
         if enhanced is None or enhanced.size == 0:
             return
@@ -290,7 +322,52 @@ class PlateDialog:
                   command=self._reset_manual_pts,
                   font=("Arial", 9), bg="#555555", fg="#ffffff",
                   activebackground="#666666", padx=6).pack(side=tk.LEFT, padx=(10, 0))
-        
+
+        # ===== 処理ステップ制御フレーム =====
+        proc_frame = tk.Frame(main_frame, bg="#2b2b2b")
+        proc_frame.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(proc_frame, text="処理ステップ:", font=("Arial", 9),
+                 fg="#cccccc", bg="#2b2b2b").pack(side=tk.LEFT, padx=(0, 5))
+
+        _ck = dict(font=("Arial", 9), fg="#cccccc", bg="#2b2b2b",
+                   selectcolor="#1a1a1a", activebackground="#2b2b2b",
+                   command=self._on_level_changed)
+
+        self.grayscale_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(proc_frame, text="グレースケール",
+                       variable=self.grayscale_var, **_ck).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.denoise_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(proc_frame, text="ノイズ除去",
+                       variable=self.denoise_var, **_ck).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.superres_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(proc_frame, text="超解像リサイズ",
+                       variable=self.superres_var, **_ck).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.normalize_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(proc_frame, text="正規化",
+                       variable=self.normalize_var, **_ck).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.binarize_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(proc_frame, text="二値化",
+                       variable=self.binarize_var,
+                       command=self._on_binarize_check_changed,
+                       font=("Arial", 9), fg="#cccccc", bg="#2b2b2b",
+                       selectcolor="#1a1a1a",
+                       activebackground="#2b2b2b").pack(side=tk.LEFT, padx=(0, 4))
+
+        tk.Label(proc_frame, text="閾値:", font=("Arial", 9),
+                 fg="#cccccc", bg="#2b2b2b").pack(side=tk.LEFT)
+        self.binarize_thresh_var = tk.StringVar(value="120")
+        self._thresh_entry = tk.Entry(proc_frame, textvariable=self.binarize_thresh_var,
+                                      width=5, font=("Arial", 9), bg="#3a3a3a", fg="#ffffff",
+                                      insertbackground="#ffffff")
+        self._thresh_entry.pack(side=tk.LEFT, padx=(2, 0))
+        self._thresh_entry.bind("<Return>", lambda e: self._on_level_changed())
+        self._thresh_entry.bind("<FocusOut>", lambda e: self._on_level_changed())
+
         # 進捗表示
         self.progress_label = tk.Label(
             main_frame,
