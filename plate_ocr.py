@@ -1,9 +1,12 @@
 # plate_ocr.py
 # ナンバープレートOCR（EasyOCR / Tesseract 切り替え版）
 
+import os
 import cv2
 import numpy as np
 from PIL import Image
+
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "EDSR_x2.pb")
 
 # ============================================================
 # OCRエンジン切り替え変数
@@ -130,7 +133,7 @@ class PlateOCR:
             gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
 
         """複数の二値化手法を試し、文字領域が最も鮮明なものを返す"""
-        # candidates = []
+        candidates = []
 
         # 閾値
         _, result = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
@@ -236,24 +239,23 @@ class PlateOCR:
         
         # 超解像リサイズ #
         if use_superres:
-            # h, w = enhanced.shape[:2]
-            # scale = p['scale']
-            # interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
-            # enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
+            h, w = enhanced.shape[:2]
+            scale = p['scale']
 
             # グレースケールになっている場合はBGR変換する
             if len(enhanced.shape) == 2:
                 enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
-            # ① モデル読み込み
-            sr = cv2.dnn_superres.DnnSuperResImpl_create()
-            sr.readModel("EDSR_x2.pb")   # ← モデルファイル
-
-            # ② モデル設定
-            sr.setModel("edsr", 2)       # ← "edsr" と scale（2 or 3 or 4）
-
-            # ④ 超解像
-            enhanced = sr.upsample(enhanced)
+            if os.path.isfile(_MODEL_PATH):
+                # EDSR 超解像
+                sr = cv2.dnn_superres.DnnSuperResImpl_create()
+                sr.readModel(_MODEL_PATH)
+                sr.setModel("edsr", 2)
+                enhanced = sr.upsample(enhanced)
+            else:
+                # モデルファイルが存在しない場合は cv2.resize にフォールバック
+                interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
+                enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
 
         # 二値化 #
         if use_binarize:
