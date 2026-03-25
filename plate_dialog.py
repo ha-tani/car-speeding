@@ -1,3 +1,4 @@
+
 # plate_dialog.py
 # ナンバープレート表示用ダイアログ（手動操作版）
 
@@ -20,7 +21,6 @@ class PlateDialog:
         self.image_label = None     # 右: 補正画像
         self.text_label = None
         self.progress_label = None
-        self.level_combo = None     # 補正レベルプルダウン
         self.invert_var = None      # 白黒反転チェックボックス
         self.is_closed = False
         self.current_enhanced = None  # 現在の補正画像
@@ -35,7 +35,7 @@ class PlateDialog:
         self.binarize_var = None
         self.binarize_thresh_var = None
         self._thresh_entry = None
-    
+
     def _bgr_to_photo(self, image):
         """BGR画像をそのままのサイズでPhotoImageに変換"""
         if image is None or image.size == 0:
@@ -44,31 +44,32 @@ class PlateDialog:
         pil_img = Image.fromarray(rgb)
         return ImageTk.PhotoImage(pil_img)
 
-    def _on_level_changed(self, event=None):
-        """補正レベルまたは反転が変更された時の処理"""
+    def _run_initial_ocr(self):
+        """ダイアログ開放時にオリジナル画像でOCRを実行"""
         if self.is_closed or self.root is None:
             return
-        
+        self._run_ocr(self.original_crop)
+        if self.root:
+            self.root.update()
+
+    def _on_correct_clicked(self):
+        """[補正]ボタンが押下されたときの処理"""
+        if self.is_closed or self.root is None:
+            return
+
         try:
-            # 選択されたレベルを取得
-            level_str = self.level_combo.get()
-            if level_str == "オリジナル":
-                level = 0
-            else:
-                level = int(level_str.replace("Lv.", ""))
-            
             # 白黒反転フラグ
             invert = self.invert_var.get()
-            
-             # 補正画像を生成（4点が選択済みならその形状を使用）
+
+            # 補正画像を生成（4点が選択済みならその形状を使用）
             pts = self._manual_pts if len(self._manual_pts) == 4 else None
             enhanced = self.plate_ocr.enhance_plate_image(
-                self.original_crop, level=level, pts=pts, **self._get_proc_kwargs())
-            
+                self.original_crop, level=1, pts=pts, **self._get_proc_kwargs())
+
             # 白黒反転
             if invert:
                 enhanced = cv2.bitwise_not(enhanced)
-            
+
             self.current_enhanced = enhanced
 
             # 表示用に 440×220 へ縮小
@@ -79,19 +80,19 @@ class PlateDialog:
                 display_img = cv2.resize(enhanced, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
             else:
                 display_img = enhanced
-            
+
             # 補正画像を表示更新（440×220）
             photo_enh = self._bgr_to_photo(display_img)
             if photo_enh:
                 self.image_label.config(image=photo_enh, width=photo_enh.width(), height=photo_enh.height())
                 self.image_label.image = photo_enh
-            
+
             # OCR実行（超解像拡大済みのサイズで実行）
             self._run_ocr(enhanced)
-            
+
             self.root.update()
         except Exception as e:
-            print(f"Level change error: {e}")
+            print(f"Correct button error: {e}")
             import traceback
             traceback.print_exc()
 
@@ -113,11 +114,10 @@ class PlateDialog:
         }
 
     def _on_binarize_check_changed(self):
-        """二値化チェック変更時: 閾値入力欄の有効/無効を切り替えてOCR再実行"""
+        """二値化チェック変更時: 閾値入力欄の有効/無効を切り替える"""
         if self._thresh_entry:
             state = tk.NORMAL if self.binarize_var.get() else tk.DISABLED
             self._thresh_entry.config(state=state)
-        self._on_level_changed()
 
     def _run_ocr(self, image):
         """指定された画像にOCRを実行し結果を表示"""
@@ -125,18 +125,18 @@ class PlateDialog:
             # 全OCRパターンを実行し多数決で最良候補を選択
             candidates = self.plate_ocr._run_all_ocr_patterns(image)
             best_text, best_score = self.plate_ocr._vote_candidates(candidates)
-            
+
             # テキストを整形して表示
             display_text = self.plate_ocr.format_japanese_plate(best_text)
             char_count = self.plate_ocr.count_recognized_chars(best_text)
-            
+
             if display_text:
                 self.text_label.config(text=display_text)
             else:
                 self.text_label.config(text="認識できませんでした")
-            
+
             self.progress_label.config(text=f"score: {best_score:.1f} | 認識文字数: {char_count}")
-            
+
         except Exception as e:
             print(f"OCR error: {e}")
             import traceback
@@ -184,11 +184,11 @@ class PlateDialog:
         if self._pts_status_label is None:
             return
         hints = [
-            "\u2460 \u5de6\u4e0a(TL)\u3092\u30af\u30ea\u30c3\u30af",
-            "\u2461 \u53f3\u4e0a(TR)\u3092\u30af\u30ea\u30c3\u30af",
-            "\u2462 \u53f3\u4e0b(BR)\u3092\u30af\u30ea\u30c3\u30af",
-            "\u2463 \u5de6\u4e0b(BL)\u3092\u30af\u30ea\u30c3\u30af",
-            "\u2713 \u88dc\u6b63\u5b8c\u4e86  (\u30ea\u30bb\u30c3\u30c8\u3067\u518d\u8a66\u884c)",
+            "① 左上(TL)をクリック",
+            "② 右上(TR)をクリック",
+            "③ 右下(BR)をクリック",
+            "④ 左下(BL)をクリック",
+            "✓ 補正完了  (リセットで再試行)",
         ]
         self._pts_status_label.config(text=hints[len(self._manual_pts)])
 
@@ -209,13 +209,11 @@ class PlateDialog:
         if len(self._manual_pts) < 4:
             return
 
-        level_str = self.level_combo.get()
-        level = 0 if level_str == "オリジナル" else int(level_str.replace("Lv.", ""))
-
         try:
             # 透視変換 + 画像補正を enhance_plate_image に一任（OCR用の大きいサイズが返る）
+            # チェックボックスで選択された処理ステップを適用（level=1）
             enhanced = self.plate_ocr.enhance_plate_image(
-                self.original_crop, level=level, pts=self._manual_pts,
+                self.original_crop, level=1, pts=self._manual_pts,
                 **self._get_proc_kwargs())
         except Exception as e:
             print(f"Perspective transform / enhance error: {e}")
@@ -263,7 +261,8 @@ class PlateDialog:
         self._manual_pts = []
         self._show_annotated_original()
         self._update_pts_hint()
-        photo_raw = self._bgr_to_photo(self.original_crop)
+        raw_440 = cv2.resize(self.original_crop, (440, 220), interpolation=cv2.INTER_AREA)
+        photo_raw = self._bgr_to_photo(raw_440)
         if photo_raw and self.image_label:
             self.image_label.config(image=photo_raw,
                                     width=photo_raw.width(), height=photo_raw.height())
@@ -274,54 +273,25 @@ class PlateDialog:
         """ダイアログを表示"""
         if self.root is not None:
             return
-        
+
         # 非表示のルートウィンドウを作成（アイコン表示防止）
         self.hidden_root = tk.Tk()
         self.hidden_root.withdraw()
-        
+
         # Toplevelダイアログを作成
         self.root = tk.Toplevel(self.hidden_root)
         self.root.title("ナンバープレート情報")
         self.root.configure(bg="#2b2b2b")
-        
+
         # ウィンドウサイズは画像に合わせて自動調整
         self.root.resizable(True, True)
-        
+
         # 閉じられた時のフラグ設定
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         # メインフレーム
         main_frame = tk.Frame(self.root, bg="#2b2b2b")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
-        
-        # ===== 補正コントロールフレーム =====
-        control_frame = tk.Frame(main_frame, bg="#2b2b2b")
-        control_frame.pack(fill=tk.X, pady=(0, 8))
-        
-        # 補正レベルプルダウン
-        tk.Label(control_frame, text="補正:", font=("Arial", 9),
-                 fg="#cccccc", bg="#2b2b2b").pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.level_combo = ttk.Combobox(control_frame, 
-                                         values=["オリジナル", "Lv.1", "Lv.2", "Lv.3", "Lv.4", "Lv.5"],
-                                         state="readonly", width=10)
-        self.level_combo.set("オリジナル")
-        self.level_combo.pack(side=tk.LEFT, padx=(0, 10))
-        self.level_combo.bind("<<ComboboxSelected>>", self._on_level_changed)
-        
-        # 白黒反転チェックボックス
-        self.invert_var = tk.BooleanVar(value=False)
-        invert_check = tk.Checkbutton(control_frame, text="白黒反転",
-                                       variable=self.invert_var,
-                                       command=self._on_level_changed,
-                                       font=("Arial", 9), fg="#cccccc", bg="#2b2b2b",
-                                       selectcolor="#1a1a1a", activebackground="#2b2b2b")
-        invert_check.pack(side=tk.LEFT)
-
-        tk.Button(control_frame, text="4点リセット",
-                  command=self._reset_manual_pts,
-                  font=("Arial", 9), bg="#555555", fg="#ffffff",
-                  activebackground="#666666", padx=6).pack(side=tk.LEFT, padx=(10, 0))
 
         # ===== 処理ステップ制御フレーム =====
         proc_frame = tk.Frame(main_frame, bg="#2b2b2b")
@@ -331,8 +301,11 @@ class PlateDialog:
                  fg="#cccccc", bg="#2b2b2b").pack(side=tk.LEFT, padx=(0, 5))
 
         _ck = dict(font=("Arial", 9), fg="#cccccc", bg="#2b2b2b",
-                   selectcolor="#1a1a1a", activebackground="#2b2b2b",
-                   command=self._on_level_changed)
+                   selectcolor="#1a1a1a", activebackground="#2b2b2b")
+        
+        self.invert_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(proc_frame, text="白黒反転",
+                       variable=self.invert_var, **_ck).pack(side=tk.LEFT, padx=(0, 4))
 
         self.grayscale_var = tk.BooleanVar(value=True)
         tk.Checkbutton(proc_frame, text="グレースケール",
@@ -365,8 +338,20 @@ class PlateDialog:
                                       width=5, font=("Arial", 9), bg="#3a3a3a", fg="#ffffff",
                                       insertbackground="#ffffff")
         self._thresh_entry.pack(side=tk.LEFT, padx=(2, 0))
-        self._thresh_entry.bind("<Return>", lambda e: self._on_level_changed())
-        self._thresh_entry.bind("<FocusOut>", lambda e: self._on_level_changed())
+
+        # ===== ボタンフレーム =====
+        button_frame = tk.Frame(main_frame, bg="#2b2b2b")
+        button_frame.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Button(button_frame, text="補正",
+                  command=self._on_correct_clicked,
+                  font=("Arial", 9), bg="#446688", fg="#ffffff",
+                  activebackground="#557799", padx=6).pack(side=tk.LEFT, padx=(6, 0))
+
+        tk.Button(button_frame, text="4点リセット",
+                  command=self._reset_manual_pts,
+                  font=("Arial", 9), bg="#555555", fg="#ffffff",
+                  activebackground="#666666", padx=6).pack(side=tk.LEFT, padx=(10, 0))
 
         # 進捗表示
         self.progress_label = tk.Label(
@@ -377,20 +362,20 @@ class PlateDialog:
             bg="#2b2b2b"
         )
         self.progress_label.pack(pady=(0, 8))
-        
+
         # ===== 画像表示フレーム =====
         image_container = tk.Frame(main_frame, bg="#2b2b2b")
         image_container.pack(pady=(0, 8))
-        
+
         # 左: オリジナル画像
         orig_frame = tk.Frame(image_container, bg="#2b2b2b")
         orig_frame.pack(side=tk.LEFT, padx=(0, 5))
-        
+
         orig_title = tk.Label(orig_frame, text="オリジナル  (4点クリックで補正)",
                               font=("Arial", 9, "bold"), fg="#cccccc", bg="#2b2b2b")
         orig_title.pack()
 
-        self._pts_status_label = tk.Label(orig_frame, text="\u2460 左上(TL)をクリック",
+        self._pts_status_label = tk.Label(orig_frame, text="① 左上(TL)をクリック",
                                           font=("Arial", 8), fg="#ffcc00", bg="#2b2b2b")
         self._pts_status_label.pack()
 
@@ -405,17 +390,17 @@ class PlateDialog:
         # 右: 補正画像
         enh_frame = tk.Frame(image_container, bg="#2b2b2b")
         enh_frame.pack(side=tk.LEFT, padx=(5, 0))
-        
+
         enh_title = tk.Label(enh_frame, text="補正画像", font=("Arial", 9, "bold"),
                             fg="#cccccc", bg="#2b2b2b")
         enh_title.pack()
-        
+
         enh_border = tk.Frame(enh_frame, bg="#555555", bd=0)
         enh_border.pack()
-        
+
         self.image_label = tk.Label(enh_border, bg="#1a1a1a")
         self.image_label.pack(padx=2, pady=2)
-        
+
         # 表示スケールを計算（幅が300px未満なら拡大してクリックしやすくする）
         ih, iw = self.original_crop.shape[:2]
         self._orig_display_scale = max(1.0, 300.0 / max(iw, 1))
@@ -429,7 +414,8 @@ class PlateDialog:
         else:
             disp_orig = self.original_crop
         photo_disp = self._bgr_to_photo(disp_orig)
-        photo_raw  = self._bgr_to_photo(self.original_crop)
+        raw_440 = cv2.resize(self.original_crop, (440, 220), interpolation=cv2.INTER_AREA)
+        photo_raw  = self._bgr_to_photo(raw_440)
         if photo_disp:
             self.original_label.config(image=photo_disp,
                                        width=photo_disp.width(), height=photo_disp.height())
@@ -440,11 +426,11 @@ class PlateDialog:
             self.image_label.image = photo_raw
 
         self.current_enhanced = self.original_crop.copy()
-        
+
         # ===== OCR結果テキスト =====
         text_frame = tk.Frame(main_frame, bg="#3a3a3a", bd=1, relief=tk.SOLID)
         text_frame.pack(fill=tk.X, pady=(0, 5))
-        
+
         text_title = tk.Label(
             text_frame,
             text="OCR結果",
@@ -453,7 +439,7 @@ class PlateDialog:
             bg="#3a3a3a"
         )
         text_title.pack(anchor="w", padx=5, pady=(3, 0))
-        
+
         self.text_label = tk.Label(
             text_frame,
             text="OCR実行中...",
@@ -464,7 +450,7 @@ class PlateDialog:
             anchor="w"
         )
         self.text_label.pack(padx=8, pady=(3, 8), fill=tk.X)
-        
+
         # ===== 閉じるボタン =====
         close_btn = tk.Button(
             main_frame,
@@ -477,22 +463,22 @@ class PlateDialog:
             activebackground="#666666"
         )
         close_btn.pack(pady=(5, 0))
-        
+
         # Escキーで閉じる
         self.root.bind("<Escape>", lambda e: self._on_closing())
-        
+
         # ウィンドウを最前面に
         self.root.lift()
         self.root.attributes('-topmost', True)
         self.root.after_idle(self.root.attributes, '-topmost', False)
-        
+
         # 初期描画を強制実行
         self.root.update_idletasks()
         self.root.update()
-        
+
         # オリジナル画像でOCRを自動実行
-        self.root.after(100, self._on_level_changed)
-    
+        self.root.after(100, self._run_initial_ocr)
+
     def process_events(self):
         """Tkinterイベントを処理（メインループから定期的に呼び出す）"""
         if self.is_closed or self.root is None:
@@ -504,7 +490,7 @@ class PlateDialog:
             self.is_closed = True
             self.root = None
             return False
-    
+
     def _on_closing(self):
         """ダイアログを閉じる"""
         self.is_closed = True

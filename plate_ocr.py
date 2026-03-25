@@ -213,16 +213,6 @@ class PlateOCR:
         if level == 0:
             return enhanced
 
-        # レベルに応じたパラメータ
-        params = {
-            1: {'scale': 3, 'denoise_h': 5,  'clahe': 1.5, 'gamma': 1.05, 'unsharp_sigma': 1.5, 'unsharp_w': 1.15, 'lap_w': 0.08, 'morph_k': 2, 'morph_i': 1},
-            2: {'scale': 3, 'denoise_h': 7,  'clahe': 2.0, 'gamma': 1.10, 'unsharp_sigma': 2.0, 'unsharp_w': 1.25, 'lap_w': 0.15, 'morph_k': 2, 'morph_i': 1},
-            3: {'scale': 4, 'denoise_h': 10, 'clahe': 2.5, 'gamma': 1.15, 'unsharp_sigma': 2.0, 'unsharp_w': 1.40, 'lap_w': 0.20, 'morph_k': 3, 'morph_i': 1},
-            4: {'scale': 4, 'denoise_h': 12, 'clahe': 3.5, 'gamma': 1.25, 'unsharp_sigma': 2.5, 'unsharp_w': 1.60, 'lap_w': 0.30, 'morph_k': 3, 'morph_i': 1},
-            5: {'scale': 5, 'denoise_h': 15, 'clahe': 4.5, 'gamma': 1.35, 'unsharp_sigma': 3.0, 'unsharp_w': 1.80, 'lap_w': 0.40, 'morph_k': 3, 'morph_i': 2},
-        }
-        p = params.get(level, params[3])
-
         # グレースケール変換 #
         if use_grayscale and len(enhanced.shape) == 3:
             enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
@@ -240,8 +230,7 @@ class PlateOCR:
         # 超解像リサイズ #
         if use_superres:
             h, w = enhanced.shape[:2]
-            scale = p['scale']
-
+           
             # グレースケールになっている場合はBGR変換する
             if len(enhanced.shape) == 2:
                 enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
@@ -255,7 +244,7 @@ class PlateOCR:
             else:
                 # モデルファイルが存在しない場合は cv2.resize にフォールバック
                 interp = cv2.INTER_LANCZOS4 if level >= 3 else cv2.INTER_CUBIC
-                enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=interp)
+                enhanced = cv2.resize(enhanced, (w * 3, h * 3), interpolation=interp)
 
         # 二値化 #
         if use_binarize:
