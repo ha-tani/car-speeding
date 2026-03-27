@@ -13,7 +13,7 @@ _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models",
 #   "easyocr"   : EasyOCR (GPU対応、日本語精度高)
 #   "tesseract" : Tesseract OCR (軽量、GPU不要)
 # ============================================================
-OCR_ENGINE = "tesseract"
+OCR_ENGINE = "easyocr"
 
 _easyocr_available = False
 _pytesseract_available = False
